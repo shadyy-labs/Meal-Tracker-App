@@ -1,0 +1,1388 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Activity,
+  ArrowLeftRight,
+  CalendarDays,
+  Check,
+  CheckCheck,
+  ChevronLeft,
+  ChevronRight,
+  CircleHelp,
+  ClipboardList,
+  CloudUpload,
+  Code2,
+  Coffee,
+  Download,
+  FileText,
+  Github,
+  Languages,
+  Leaf,
+  Moon,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Save,
+  Search,
+  Settings2,
+  ShieldAlert,
+  Sun,
+  Trash2,
+  UtensilsCrossed,
+  X,
+} from 'lucide-react';
+
+/**
+ * PDF Meal Plan Extractor / Daily Tracker
+ * Install: npm i lucide-react
+ * Styling: Tailwind CSS must be configured in the host Vite project.
+ * PDF.js is injected from the CDN only when a PDF is first uploaded.
+ * All plan and day data stays in this browser's localStorage.
+ */
+const PLAN_KEY = 'persistent_nutrition_plan';
+const DAY_PREFIX = 'daily_logs_';
+const SETTINGS_KEY = 'meal_tracker_settings';
+const uid = () =>
+  typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const clamp = (v, low, high) => Math.min(high, Math.max(low, Number.isFinite(+v) ? +v : low));
+const dateKey = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const moveDay = (date, amount) => {
+  const d = new Date(`${date}T12:00:00`);
+  d.setDate(d.getDate() + amount);
+  return dateKey(d);
+};
+function readJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function cleanArabic(str) {
+  return String(str || '')
+    .replace(/[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/[\u064b-\u065f\u0670]/g, '')
+    .replace(/ـ/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+const DIGITS = '٠١٢٣٤٥٦٧٨٩';
+function latinDigits(s) {
+  return String(s)
+    .replace(/[٠-٩]/g, (c) => DIGITS.indexOf(c))
+    .replace(/[۰-۹]/g, (c) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(c))
+    .replace(/٫/g, '.')
+    .replace(/٬/g, '');
+}
+function normalizeText(s) {
+  return latinDigits(cleanArabic(s))
+    .replace(/[＞﹥›]/g, '>')
+    .replace(/\b(?:p|ρ|р)\s*[>|:]\s*(\d+(?:\.\d+)?)/gi, '$1 جم')
+    .replace(/(?:جم|ج|جرام)\s*[>|:]\s*(\d+(?:\.\d+)?)/gi, '$1 جم')
+    .replace(/\(\s*(?:ρ|p|ج|جم)\s*\|?\s*>\s*(\d+(?:\.\d+)?)\s*\)/gi, '$1 جم')
+    .replace(/\(\s*(\d+(?:\.\d+)?)\s*\)\s*(جرام|جم|غرام|g)\b/gi, '$1 $2')
+    .replace(/\(\s*(\d+(?:\.\d+)?)\s*(?:جرام|جم|غرام|g)\s*\)/gi, '$1 جم')
+    .replace(/\b(?:غرام|جرام|grams|gram)\b/gi, 'جم')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+const weightRe =
+  /(?:^|\s|\()(?<before>\d{1,5}(?:\.\d+)?)\s*(?:جم|ج|g|gr)(?=\s|\)|$)|(?:جم|ج|g|gr)\s*(?<after>\d{1,5}(?:\.\d+)?)/iu;
+function getWeight(line) {
+  const s = normalizeText(line);
+  const m = s.match(weightRe);
+  if (m) return Number(m.groups?.before || m.groups?.after);
+  // Handles broken glyphs e.g. (p>30) after symbol cleanup.
+  const odd = s.match(/(?:\(|^)(?:[ρpج]\s*\|?\s*>\s*)?(\d{1,5}(?:\.\d+)?)\s*\)?$/iu);
+  return odd && /[>\(]/.test(s) ? Number(odd[1]) : null;
+}
+function withoutWeight(line) {
+  return normalizeText(line)
+    .replace(
+      /(?:\(?\s*\d{1,5}(?:\.\d+)?\s*(?:جم|ج|g|gr)\s*\)?|\(?\s*(?:جم|ج|g|gr)\s*\d{1,5}(?:\.\d+)?\s*\)?)/giu,
+      '',
+    )
+    .replace(/^[\s•·:\-–—|()]+|[\s•·:\-–—|()]+$/g, '')
+    .trim();
+}
+const MEAL_TYPES = ['breakfast', 'snack', 'lunch', 'dinner', 'supplements'];
+function kindOf(s) {
+  const t = cleanArabic(s).toLowerCase();
+  if (/(?:\bbreakfast\b|فطار|افطار|إفطار|الفطور)/i.test(t)) return 'breakfast';
+  if (/(?:\blunch\b|الغداء|غداء)/i.test(t)) return 'lunch';
+  if (/(?:\bdinner\b|العشاء|عشاء)/i.test(t)) return 'dinner';
+  if (/(?:\bsnacks?\b|سناك|وجبة خفيفة)/i.test(t)) return 'snack';
+  if (/(?:\bsupplements?\b|مكملات)/i.test(t)) return 'supplements';
+  return null;
+}
+const isAlternatives = (s) =>
+  /^(?:البدائل|بدائل|alternatives?|substitutes?)\s*:?$/i.test(cleanArabic(s));
+function makeOption(name, grams) {
+  return { id: uid(), name: cleanArabic(name), grams: Number(grams) || 0 };
+}
+function makeSlot(name, grams, alternatives = []) {
+  return {
+    id: uid(),
+    primary: makeOption(name, grams),
+    alternatives: alternatives.map((a) => makeOption(a[0], a[1])),
+  };
+}
+function makeMeal(kind, note = '') {
+  return { id: uid(), kind, note, slots: [] };
+}
+const samplePlan = () => ({
+  id: uid(),
+  name: 'Shady Walid — Diet Week 2–3',
+  createdAt: new Date().toISOString(),
+  origin: 'sample',
+  notes:
+    'جميع أوزان الطعام بعد الطهي. يرجى مراجعة الخطة الأصلية. ملحوظة: المكمل الغذائي يمكن أن يحل محل 80 جم من صدور دجاج الغداء، وليس إضافة تلقائية.',
+  meals: [
+    {
+      ...makeMeal('breakfast'),
+      slots: [
+        makeSlot('توست بني', 60, [['تورتيلا', 50]]),
+        makeSlot('بيض مسلوق كامل', 110),
+        makeSlot('جبنة قريش', 50, [['جبنة الشيدر خالية من الدهون', 30]]),
+        makeSlot('خس', 100),
+      ],
+    },
+    {
+      ...makeMeal('snack', 'اللوز ني غير مملح — طحن الشوفان وعمل بان كيك صحي'),
+      slots: [
+        makeSlot('شوفان سريع الطهي من لينو', 30),
+        makeSlot('بيض كامل', 55),
+        makeSlot('لبن خالي من الدسم', 240),
+        makeSlot('خلاصة الفانيليا', 5),
+        makeSlot('بيكنج بودر', 5),
+        makeSlot('موز', 100, [
+          ['تفاح', 150],
+          ['فراولة', 280],
+        ]),
+        makeSlot('لوز', 30),
+      ],
+    },
+    {
+      ...makeMeal('lunch', 'المكرونة مرتين فقط في الأسبوع، واللحم الأحمر مرتين في الأسبوع'),
+      slots: [
+        makeSlot('أرز بسمتي مسلوق', 150, [
+          ['أرز بني مطهي', 150],
+          ['مكرونة القمح الكامل مطهية', 120],
+        ]),
+        makeSlot('صدر دجاج مشوي - لحم فقط', 180, [
+          ['بوري مشوي', 180],
+          ['ستيك بقري مشوي', 180],
+          ['سمك بلطي مشوي', 180],
+          ['كفتة مشوية', 180],
+        ]),
+        makeSlot('سلطة (طماطم وجزر وفلفل وخيار)', 200),
+        makeSlot('زيت الزيتون', 5),
+      ],
+    },
+    {
+      ...makeMeal('snack', 'قبل التمرين بنصف ساعة'),
+      slots: [
+        makeSlot('موز', 100, [
+          ['بطاطا حلوة مشوية', 100],
+          ['بلح - تمر مجفف', 30],
+        ]),
+        makeSlot('شوكولاتة دارك 70%–85% كاكاو', 20),
+      ],
+    },
+    {
+      ...makeMeal('dinner', 'التونة مرتين فقط في الأسبوع — بعد التمرين مباشرة'),
+      slots: [
+        makeSlot('تورتيلا', 50),
+        makeSlot('صدر دجاج مشوي - لحم فقط', 100, [
+          ['سمك التونة الأبيض المعلب في الزيت - مصفى', 120],
+        ]),
+        makeSlot('خس', 100),
+      ],
+    },
+    {
+      ...makeMeal(
+        'supplements',
+        'يمكن استبدال 80 جم من صدور دجاج الغداء بسكوب واي بروتين. راجع هذا الاستبدال مع مدربك.',
+      ),
+      slots: [makeSlot('Limitless Alpha Concentrate Whey Protein', 33)],
+    },
+  ],
+});
+
+// Separately detect headers and keep repeated Snacks as distinct meal sections.
+function parseMealText(input) {
+  const lines = String(input || '')
+    .replace(/\r/g, '\n')
+    .split(/\n/)
+    .map((s) => normalizeText(s))
+    .filter(Boolean);
+  const meals = [];
+  let current = null;
+  let lastSlot = null;
+  let alternatives = false;
+  let weightOnly = null;
+  const skip =
+    /^(?:ملخص النظام الغذائي|السعرات|البروتين|الكربوهيدرات|الدهون|الفيتامينات|التعليمات|shady walid|diet plan|ash\b|iron\b|zinc\b)/i;
+  function addLine(line, forceAlt = alternatives) {
+    const grams = getWeight(line);
+    if (grams == null || !current) return false;
+    const name = withoutWeight(line)
+      .replace(/^\s*[•●]\s*/, '')
+      .trim();
+    if (!name || /^\d+(?:\.\d+)?$/.test(name)) {
+      weightOnly = { grams, forceAlt };
+      return true;
+    }
+    if (forceAlt && lastSlot) lastSlot.alternatives.push(makeOption(name, grams));
+    else {
+      lastSlot = makeSlot(name, grams);
+      current.slots.push(lastSlot);
+      alternatives = false;
+    }
+    return true;
+  }
+  for (const line of lines) {
+    const head = kindOf(line);
+    if (
+      head &&
+      (line.length < 40 ||
+        /^\s*(?:\d+[.)\s-]+)?(?:breakfast|lunch|dinner|snack|supplements|فطار|إفطار|غداء|عشاء|سناك|مكملات)/i.test(
+          line,
+        ))
+    ) {
+      current = makeMeal(head);
+      meals.push(current);
+      lastSlot = null;
+      alternatives = false;
+      weightOnly = null;
+      continue;
+    }
+    if (!current) continue;
+    if (isAlternatives(line)) {
+      alternatives = true;
+      weightOnly = null;
+      continue;
+    }
+    if (skip.test(line)) continue;
+    if (weightOnly && getWeight(line) == null && line.length > 1) {
+      if (weightOnly.forceAlt && lastSlot)
+        lastSlot.alternatives.push(makeOption(line, weightOnly.grams));
+      else {
+        lastSlot = makeSlot(line, weightOnly.grams);
+        current.slots.push(lastSlot);
+        alternatives = false;
+      }
+      weightOnly = null;
+      continue;
+    }
+    if (addLine(line)) continue;
+    if (!lastSlot && line.length > 8 && !/\d{4,}/.test(line))
+      current.note = current.note ? `${current.note} — ${line}` : line;
+  }
+  return {
+    id: uid(),
+    name: 'Imported nutrition plan',
+    createdAt: new Date().toISOString(),
+    origin: 'import',
+    notes: '',
+    meals: meals.filter((m) => m.slots.length),
+  };
+}
+
+// PDF text items can be laid out in two different directions, so reconstruct rows
+// by vertical position, then join the Arabic name and numeric quantity columns.
+function pageRows(items) {
+  const rows = [];
+  for (const item of items) {
+    const text = cleanArabic(item.str);
+    if (!text) continue;
+    const x = item.transform?.[4] ?? 0,
+      y = item.transform?.[5] ?? 0;
+    let row = rows.find((r) => Math.abs(r.y - y) < 3.4);
+    if (!row) {
+      row = { y, parts: [] };
+      rows.push(row);
+    }
+    row.parts.push({ text, x });
+  }
+  return rows
+    .sort((a, b) => b.y - a.y)
+    .map((row) => {
+      const chunks = row.parts.sort((a, b) => a.x - b.x);
+      // Keep column text separated: matching grams is direction-independent.
+      return normalizeText(chunks.map((c) => c.text).join(' '));
+    });
+}
+let pdfPromise;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (!pdfPromise)
+    pdfPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      s.onload = () => {
+        const lib = window.pdfjsLib;
+        if (!lib) return reject(new Error('PDF.js unavailable'));
+        lib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        resolve(lib);
+      };
+      s.onerror = () => reject(new Error('Unable to load PDF.js CDN script'));
+      document.head.appendChild(s);
+    }).catch((e) => {
+      pdfPromise = undefined;
+      throw e;
+    });
+  return pdfPromise;
+}
+async function extractPdf(file) {
+  const lib = await loadPdfJs();
+  const data = new Uint8Array(await file.arrayBuffer());
+  const doc = await lib.getDocument({ data }).promise;
+  let parts = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const content = await page.getTextContent();
+    parts.push(pageRows(content.items).join('\n'));
+  }
+  return parts.join('\n');
+}
+function validatePlan(plan) {
+  return !!(
+    plan?.meals?.length &&
+    plan.meals.some((m) => m.slots?.some((s) => s.primary?.name?.trim() && +s.primary.grams > 0))
+  );
+}
+function itemFor(slot, entry) {
+  return (
+    [slot.primary, ...(slot.alternatives || [])].find((o) => o.id === entry?.optionId) ||
+    slot.primary
+  );
+}
+function entryFor(logs, slot) {
+  return logs[slot.id] || { optionId: slot.primary.id, eaten: 0 };
+}
+const translations = {
+  ar: {
+    app: 'متتبع الخطة الغذائية',
+    subtitle: 'خطة ثابتة • متابعة يومية دقيقة',
+    today: 'اليوم',
+    meals: 'الوجبات',
+    remaining: 'المتبقي من الطعام',
+    remainingHelp: 'الكميات المتبقية من اختيارات اليوم',
+    allDone: 'تناولت جميع الكميات المحددة لهذا اليوم!',
+    eatAll: 'تسجيل تناول كل المتبقي',
+    upload: 'استيراد خطة PDF',
+    replace: 'استبدال الخطة',
+    sample: 'تحميل الخطة التجريبية',
+    planMissing: 'ابدأ بخطة غذائية',
+    planMissingText:
+      'ارفع ملف PDF أو الصق نص الخطة، أو جرب المثال المأخوذ من ملف شادي وليد المرفق.',
+    plan: 'الخطة الأساسية',
+    persist: 'تبقى الخطة كما هي عند تغيير التاريخ',
+    eaten: 'المتناول',
+    goal: 'الهدف',
+    complete: 'مكتمل',
+    partial: 'جزئي',
+    notStarted: 'لم يبدأ',
+    alternatives: 'البدائل',
+    left: 'متبقي',
+    locked: 'لا يمكن تغيير الاختيار بعد تسجيل كمية منه. أعد الكمية إلى صفر للتبديل.',
+    primary: 'الاختيار الأساسي',
+    edit: 'تسجيل الكمية',
+    grams: 'جرام',
+    selected: 'الطعام المختار',
+    consumed: 'الكمية التي تناولتها',
+    save: 'حفظ',
+    markComplete: 'تناولت الكمية كاملة',
+    cancel: 'إلغاء',
+    close: 'إغلاق',
+    add: 'إضافة',
+    delete: 'حذف',
+    review: 'مراجعة الخطة المستخرجة',
+    reviewDescription: 'راجع الأطعمة والأوزان والبدائل قبل تثبيت الخطة.',
+    import: 'تثبيت الخطة',
+    sourceText: 'الصق النص',
+    selectPDF: 'اختر PDF',
+    parseText: 'استخراج من النص',
+    warning:
+      'تعذر اكتشاف وجبات واضحة. جرب فصل أسماء الوجبات ووضع الوزن بجانب الصنف، ثم راجع النتائج.',
+    loading: 'جاري قراءة PDF...',
+    confirmReplace: 'استبدال الخطة سيحذف سجلات الأيام السابقة نهائيًا. هل تريد المتابعة؟',
+    confirmAll: 'تسجيل جميع الكميات المتبقية لهذا اليوم كمتناولة؟',
+    confirmReset: 'مسح تسجيلات هذا اليوم فقط؟',
+    resetDay: 'تصفير اليوم',
+    reset: 'تصفير',
+    // guide: 'دليل النشر',
+    settings: 'الإعدادات',
+    dark: 'المظهر الداكن',
+    breakfast: 'الفطار',
+    lunch: 'الغداء',
+    dinner: 'العشاء',
+    snack: 'سناك',
+    supplements: 'المكملات',
+    mealNote: 'ملاحظة الوجبة',
+    planName: 'اسم الخطة',
+    addMeal: 'إضافة وجبة',
+    addFood: 'إضافة صنف',
+    addAlternative: 'إضافة بديل',
+    optionName: 'اسم الطعام',
+    optionWeight: 'الوزن بالجرام',
+    noMeals: 'لم يتم العثور على وجبات.',
+    pdfWarning:
+      'استخراج النص يعمل لملفات PDF النصية. الملفات المصورة تحتاج OCR خارجي أو لصق النص بعد تحويله.',
+    local: 'بياناتك محفوظة على هذا الجهاز فقط.',
+    previous: 'اليوم السابق',
+    next: 'اليوم التالي',
+    help: 'مساعدة',
+    export: 'تصدير الخطة JSON',
+    issues: 'تفاصيل استخراج النص',
+    retry: 'إعادة الاستيراد',
+    empty: 'لا توجد كميات متبقية',
+    total: 'التقدم اليومي',
+    items: 'الأصناف',
+    resetWarning: 'ستتغير الكميات اليومية فقط؛ لن تتغير خطتك الأساسية.',
+    replaceOnly: 'لا يتم تغيير الخطة إلا عند تأكيد الاستبدال.',
+    browse: 'اختيار ملف',
+    hint: 'مثال: Breakfast ثم 60 جم توست بني ثم البدائل ثم 50 جم تورتيلا',
+    cannotExtract: 'تعذر استخراج نص من هذا PDF. قد يكون ممسوحًا ضوئيًا.',
+    weekday: 'تاريخ المتابعة',
+  },
+  en: {
+    app: 'Meal Plan Tracker',
+    subtitle: 'Fixed plan • precise daily logging',
+    today: 'Today',
+    meals: 'Meals',
+    remaining: 'Remaining foods',
+    remainingHelp: 'Amounts left from today’s chosen foods',
+    allDone: 'All selected food targets completed today!',
+    eatAll: 'Mark all remaining as eaten',
+    upload: 'Import PDF plan',
+    replace: 'Replace plan',
+    sample: 'Load sample plan',
+    planMissing: 'Start with a meal plan',
+    planMissingText:
+      'Upload a PDF, paste plan text, or try the sample based on your attached Shady Walid plan.',
+    plan: 'Master plan',
+    persist: 'Plan stays fixed when you change dates',
+    eaten: 'Eaten',
+    goal: 'Target',
+    complete: 'Complete',
+    partial: 'Partial',
+    notStarted: 'Not started',
+    alternatives: 'Alternatives',
+    left: 'left',
+    locked: 'Choice is locked once you log grams from it. Set eaten back to 0 to switch.',
+    primary: 'Primary choice',
+    edit: 'Log grams',
+    grams: 'g',
+    selected: 'Selected food',
+    consumed: 'Grams eaten',
+    save: 'Save',
+    markComplete: 'Mark fully eaten',
+    cancel: 'Cancel',
+    close: 'Close',
+    add: 'Add',
+    delete: 'Delete',
+    review: 'Review extracted plan',
+    reviewDescription: 'Verify foods, gram targets, and alternatives before applying.',
+    import: 'Apply plan',
+    sourceText: 'Paste text',
+    selectPDF: 'Choose PDF',
+    parseText: 'Extract text',
+    warning:
+      'No recognizable meal items found. Try adding explicit meal headings and weights, then review.',
+    loading: 'Reading PDF...',
+    confirmReplace: 'Replacing the plan permanently deletes all previous daily logs. Continue?',
+    confirmAll: 'Mark every remaining gram for today as eaten?',
+    confirmReset: 'Clear only today’s consumption logs?',
+    resetDay: 'Reset today',
+    reset: 'Reset',
+    reviewDescription2: 'Review before importing',
+    // guide: 'Deployment guide',
+    settings: 'Settings',
+    dark: 'Dark mode',
+    breakfast: 'Breakfast',
+    lunch: 'Lunch',
+    dinner: 'Dinner',
+    snack: 'Snack',
+    supplements: 'Supplements',
+    mealNote: 'Meal note',
+    planName: 'Plan name',
+    addMeal: 'Add meal',
+    addFood: 'Add food',
+    addAlternative: 'Add alternative',
+    optionName: 'Food name',
+    optionWeight: 'Weight in grams',
+    noMeals: 'No meals detected.',
+    pdfWarning:
+      'Text-based PDFs are supported. Scanned/image-only PDFs need external OCR or manually pasted OCR text.',
+    local: 'Your data stays in this browser.',
+    previous: 'Previous day',
+    next: 'Next day',
+    help: 'Help',
+    export: 'Export plan JSON',
+    issues: 'Extracted text details',
+    retry: 'Import again',
+    empty: 'Nothing remains',
+    total: 'Daily progress',
+    items: 'Items',
+    resetWarning: 'Only your daily logs change; the master plan remains fixed.',
+    replaceOnly: 'Your plan is changed only after you confirm replacement.',
+    browse: 'Choose file',
+    hint: 'Example: Breakfast, 60 g brown toast, Alternatives, 50 g tortilla',
+    cannotExtract: 'No text could be extracted. This PDF may be scanned.',
+    weekday: 'Tracking date',
+  },
+};
+const Button = ({ children, variant = 'secondary', className = '', ...props }) => (
+  <button
+    {...props}
+    className={`inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-emerald-400 ${variant === 'primary' ? 'bg-emerald-500 text-slate-950 hover:bg-emerald-400' : variant === 'danger' ? 'bg-rose-500/15 text-rose-500 hover:bg-rose-500/25' : 'bg-slate-100 text-slate-800 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700'} ${className}`}
+  >
+    {children}
+  </button>
+);
+const Modal = ({ title, onClose, children, wide = false }) => (
+  <div
+    className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-3 sm:p-6"
+    onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+  >
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      className={`flex max-h-[94dvh] w-full ${wide ? 'max-w-5xl' : 'max-w-lg'} flex-col overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-slate-900`}
+    >
+      <header className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-slate-800">
+        <h2 className="text-xl font-bold">{title}</h2>
+        <button
+          aria-label="Close"
+          onClick={onClose}
+          className="rounded-lg p-2 hover:bg-slate-100 dark:hover:bg-slate-800"
+        >
+          <X size={20} />
+        </button>
+      </header>
+      <div className="overflow-y-auto p-5">{children}</div>
+    </div>
+  </div>
+);
+const Field = ({ value, onChange, placeholder, type = 'text', min, className = '', ...props }) => (
+  <input
+    {...props}
+    type={type}
+    min={min}
+    value={value}
+    onChange={(e) => onChange(e.target.value)}
+    placeholder={placeholder}
+    className={`w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-900 outline-none focus:border-emerald-500 dark:border-slate-700 dark:bg-slate-800 dark:text-white ${className}`}
+  />
+);
+function Progress({ eaten, total }) {
+  const ratio = total > 0 ? clamp(eaten / total, 0, 1) : 0;
+  return (
+    <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+      <div
+        className={`h-full rounded-full transition-all duration-300 ${ratio >= 1 ? 'bg-emerald-500' : ratio > 0 ? 'bg-indigo-500' : 'bg-slate-300 dark:bg-slate-600'}`}
+        style={{ width: `${ratio * 100}%` }}
+      />
+    </div>
+  );
+}
+function MealEditor({ draft, setDraft, t }) {
+  const update = (updater) =>
+    setDraft((old) => {
+      const copy = structuredClone(old);
+      updater(copy);
+      return copy;
+    });
+  return (
+    <div className="space-y-5">
+      <label className="block space-y-1 text-sm font-semibold">
+        {t.planName}
+        <Field
+          value={draft.name}
+          onChange={(v) =>
+            update((p) => {
+              p.name = v;
+            })
+          }
+        />
+      </label>
+      {draft.meals.map((meal, mi) => (
+        <div
+          key={meal.id}
+          className="space-y-3 rounded-2xl border border-slate-200 p-3 dark:border-slate-700"
+        >
+          <div className="flex gap-2">
+            <select
+              aria-label="Meal category"
+              value={meal.kind}
+              onChange={(e) =>
+                update((p) => {
+                  p.meals[mi].kind = e.target.value;
+                })
+              }
+              className="flex-1 rounded-xl bg-slate-100 px-2 py-2 font-bold dark:bg-slate-800"
+            >
+              {MEAL_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {t[type]}
+                </option>
+              ))}
+            </select>
+            <Button
+              variant="danger"
+              aria-label={t.delete}
+              onClick={() => update((p) => p.meals.splice(mi, 1))}
+            >
+              <Trash2 size={16} />
+            </Button>
+          </div>
+          <Field
+            placeholder={t.mealNote}
+            value={meal.note || ''}
+            onChange={(v) =>
+              update((p) => {
+                p.meals[mi].note = v;
+              })
+            }
+          />
+          {meal.slots.map((slot, si) => (
+            <div key={slot.id} className="rounded-xl bg-slate-50 p-3 dark:bg-slate-950/60">
+              <div className="flex items-center gap-2">
+                <div className="flex-[3]">
+                  <Field
+                    placeholder={t.optionName}
+                    value={slot.primary.name}
+                    onChange={(v) =>
+                      update((p) => {
+                        p.meals[mi].slots[si].primary.name = v;
+                      })
+                    }
+                  />
+                </div>
+                <div className="w-24">
+                  <Field
+                    type="number"
+                    min="0"
+                    value={slot.primary.grams}
+                    onChange={(v) =>
+                      update((p) => {
+                        p.meals[mi].slots[si].primary.grams = clamp(v, 0, 99999);
+                      })
+                    }
+                  />
+                </div>
+                <button
+                  aria-label={t.delete}
+                  className="text-rose-500"
+                  onClick={() => update((p) => p.meals[mi].slots.splice(si, 1))}
+                >
+                  <Trash2 size={17} />
+                </button>
+              </div>
+              {slot.alternatives.map((alt, ai) => (
+                <div key={alt.id} className="mt-2 flex items-center gap-2 ps-3">
+                  <span className="hidden text-xs text-slate-400 sm:block">↳</span>
+                  <div className="flex-[3]">
+                    <Field
+                      placeholder={t.alternatives}
+                      value={alt.name}
+                      onChange={(v) =>
+                        update((p) => {
+                          p.meals[mi].slots[si].alternatives[ai].name = v;
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="w-24">
+                    <Field
+                      type="number"
+                      min="0"
+                      value={alt.grams}
+                      onChange={(v) =>
+                        update((p) => {
+                          p.meals[mi].slots[si].alternatives[ai].grams = clamp(v, 0, 99999);
+                        })
+                      }
+                    />
+                  </div>
+                  <button
+                    aria-label={t.delete}
+                    className="text-rose-500"
+                    onClick={() => update((p) => p.meals[mi].slots[si].alternatives.splice(ai, 1))}
+                  >
+                    <Trash2 size={17} />
+                  </button>
+                </div>
+              ))}
+              <button
+                onClick={() =>
+                  update((p) => p.meals[mi].slots[si].alternatives.push(makeOption('', 0)))
+                }
+                className="mt-2 flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400"
+              >
+                <Plus size={14} />
+                {t.addAlternative}
+              </button>
+            </div>
+          ))}
+          <Button
+            className="w-full"
+            onClick={() => update((p) => p.meals[mi].slots.push(makeSlot('', 0)))}
+          >
+            <Plus size={16} />
+            {t.addFood}
+          </Button>
+        </div>
+      ))}
+      <Button onClick={() => update((p) => p.meals.push(makeMeal('snack')))}>
+        <Plus size={16} />
+        {t.addMeal}
+      </Button>
+    </div>
+  );
+}
+
+// function DeploymentGuide({ lang }) { return lang === 'ar' ? <div className="space-y-5 text-sm leading-7"><p>هذه واجهة React ذات ملف واحد، لكنها تحتاج مشروع Vite مع Tailwind و lucide-react. يمكن تشغيلها على GitHub Pages أو Vercel أو Netlify.</p><div><b>1. إنشاء مشروع React</b><pre dir="ltr" className="mt-2 overflow-x-auto rounded-xl bg-slate-950 p-3 text-left text-emerald-300">npm create vite@latest meal-tracker -- --template react{'\n'}cd meal-tracker{'\n'}npm install{'\n'}npm install lucide-react tailwindcss @tailwindcss/vite</pre></div><div><b>2. ضبط Tailwind</b><p>أضف استيراد <code>@import "tailwindcss";</code> إلى <code>src/index.css</code>، وفعّل إضافة <code>@tailwindcss/vite</code> في <code>vite.config.js</code> عبر <code>plugins: [react(), tailwindcss()]</code> مع استيراد <code>tailwindcss from '@tailwindcss/vite'</code>. أضف <code>@custom-variant dark (&:where(.dark, .dark *));</code> في <code>src/index.css</code>.</p></div><div><b>3. نسخ التطبيق</b><p>ضع هذا الملف داخل <code>src/App.jsx</code> ثم شغّل <code>npm run dev</code>.</p></div><div><b>4. النشر</b><p><b>Vercel / Netlify:</b> ارفع المشروع إلى GitHub، اربطه بالمنصة، واستخدم Build command <code>npm run build</code> و Output <code>dist</code>.</p><p><b>GitHub Pages:</b> ثبّت <code>gh-pages</code>، واضبط <code>base: '/YOUR_REPO/'</code> في إعدادات Vite، ثم انشر مجلد <code>dist</code> عبر GitHub Actions أو gh-pages.</p></div><p className="text-amber-600">تنبيه: بيانات localStorage لا تتزامن بين الأجهزة، وتمسح عند حذف بيانات الموقع. واستخراج PDF يحتاج إنترنت لتحميل PDF.js من CDN.</p></div> : <div className="space-y-5 text-sm leading-7"><p>This single-file React app runs inside a Vite + Tailwind project.</p><div><b>1. Create project</b><pre className="mt-2 overflow-x-auto rounded-xl bg-slate-950 p-3 text-emerald-300">npm create vite@latest meal-tracker -- --template react{'\n'}cd meal-tracker{'\n'}npm install{'\n'}npm install lucide-react tailwindcss @tailwindcss/vite</pre></div><div><b>2. Enable Tailwind</b><p>Add <code>import tailwindcss from '@tailwindcss/vite'</code> and <code>tailwindcss()</code> to your Vite plugins next to <code>react()</code>. In <code>src/index.css</code>, add <code>@import "tailwindcss";</code> followed by <code>@custom-variant dark (&:where(.dark, .dark *));</code>.</p></div><div><b>3. Add app</b><p>Replace <code>src/App.jsx</code> with this file, then run <code>npm run dev</code>.</p></div><div><b>4. Deploy</b><p>Push to GitHub and import the repository into <b>Vercel</b> or <b>Netlify</b>. Use build command <code>npm run build</code> and publish directory <code>dist</code>.</p><p>For <b>GitHub Pages</b>, set Vite <code>base: '/YOUR_REPO/'</code> and publish the <code>dist</code> directory with GitHub Actions or the gh-pages package.</p></div><p className="text-amber-600">LocalStorage is device/browser-specific; there is no cloud sync. PDF.js loads from CDN and requires a network connection.</p></div>; }
+
+export default function App() {
+  const [prefs, setPrefs] = useState(() => readJSON(SETTINGS_KEY, { lang: 'ar', dark: false }));
+  const lang = prefs.lang === 'en' ? 'en' : 'ar';
+  const t = translations[lang];
+  const [plan, setPlan] = useState(() => readJSON(PLAN_KEY, null));
+  const [day, setDay] = useState(() => dateKey(new Date()));
+  const [log, setLog] = useState(() => readJSON(DAY_PREFIX + dateKey(new Date()), {}));
+  const [modal, setModal] = useState(null); // import, review, log
+  const [draft, setDraft] = useState(null);
+  const [textInput, setTextInput] = useState('');
+  const [rawExtracted, setRawExtracted] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [editing, setEditing] = useState(null);
+  const fileRef = useRef(null);
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(prefs));
+    document.documentElement.classList.toggle('dark', !!prefs.dark);
+  }, [prefs]);
+  useEffect(() => {
+    setLog(readJSON(DAY_PREFIX + day, {}));
+  }, [day]);
+  const commitLog = (updater) =>
+    setLog((old) => {
+      const next = typeof updater === 'function' ? updater(old) : updater;
+      localStorage.setItem(DAY_PREFIX + day, JSON.stringify(next));
+      return next;
+    });
+  const rows = useMemo(
+    () =>
+      (plan?.meals || []).flatMap((meal, mi) =>
+        (meal.slots || []).map((slot) => {
+          const entry = entryFor(log, slot),
+            option = itemFor(slot, entry);
+          return {
+            meal,
+            mi,
+            slot,
+            entry,
+            option,
+            goal: +option.grams || 0,
+            eaten: clamp(entry.eaten, 0, +option.grams || 0),
+          };
+        }),
+      ),
+    [plan, log],
+  );
+  const totals = useMemo(
+    () =>
+      rows.reduce(
+        (acc, row) => ({
+          goal: acc.goal + row.goal,
+          eaten: acc.eaten + row.eaten,
+          completed: acc.completed + (row.goal > 0 && row.eaten >= row.goal ? 1 : 0),
+        }),
+        { goal: 0, eaten: 0, completed: 0 },
+      ),
+    [rows],
+  );
+  const remaining = rows.filter((r) => r.goal - r.eaten > 0);
+  const number = (n) =>
+    new Intl.NumberFormat(lang === 'ar' ? 'ar-EG' : 'en-US', { maximumFractionDigits: 1 }).format(
+      n,
+    );
+  const displayDate = new Intl.DateTimeFormat(lang === 'ar' ? 'ar-EG' : 'en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(new Date(`${day}T12:00:00`));
+  const ask = (message) => window.confirm(message);
+  const replacePlan = (value) => {
+    if (!validatePlan(value)) {
+      setError(t.warning);
+      return;
+    }
+    if (plan && !ask(t.confirmReplace)) return;
+    if (plan)
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key?.startsWith(DAY_PREFIX)) localStorage.removeItem(key);
+      }
+    localStorage.setItem(PLAN_KEY, JSON.stringify(value));
+    setPlan(value);
+    setLog({});
+    setModal(null);
+    setError('');
+  };
+  const preview = (value) => {
+    if (!value.meals?.length) {
+      setError(t.warning);
+      return;
+    }
+    setDraft(value);
+    setError('');
+    setModal('review');
+  };
+  const fromText = () => {
+    const value = parseMealText(textInput);
+    setRawExtracted(textInput);
+    preview(value);
+  };
+  const fromFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setError('');
+    try {
+      const raw = await extractPdf(file);
+      setTextInput(raw);
+      setRawExtracted(raw);
+      if (!raw.trim()) throw new Error(t.cannotExtract);
+      const value = parseMealText(raw);
+      value.name = file.name.replace(/\.pdf$/i, '');
+      preview(value);
+    } catch (err) {
+      setError(`${err.message}. ${t.pdfWarning}`);
+      setModal('import');
+    } finally {
+      setBusy(false);
+      e.target.value = '';
+    }
+  };
+  const openEntry = (row) => {
+    setEditing({ slotId: row.slot.id, optionId: row.option.id, eaten: row.eaten });
+    setModal('log');
+  };
+  const saveEntry = () => {
+    const slot = rows.find((r) => r.slot.id === editing?.slotId)?.slot;
+    if (!slot) return;
+    const opt =
+      [slot.primary, ...slot.alternatives].find((o) => o.id === editing.optionId) || slot.primary;
+    commitLog((old) => ({
+      ...old,
+      [slot.id]: { optionId: opt.id, eaten: clamp(editing.eaten, 0, opt.grams) },
+    }));
+    setModal(null);
+  };
+  const chooseOption = (slot, optionId) =>
+    commitLog((old) =>
+      entryFor(old, slot).eaten > 0 ? old : { ...old, [slot.id]: { optionId, eaten: 0 } },
+    );
+  const eatRemaining = () => {
+    if (!ask(t.confirmAll)) return;
+    commitLog((old) => {
+      const next = { ...old };
+      rows.forEach((r) => {
+        next[r.slot.id] = { optionId: r.option.id, eaten: r.goal };
+      });
+      return next;
+    });
+  };
+  const exportPlan = () => {
+    const blob = new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'nutrition-plan.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <div
+      dir={lang === 'ar' ? 'rtl' : 'ltr'}
+      className="min-h-dvh bg-slate-50 font-sans text-slate-900 transition-colors dark:bg-slate-950 dark:text-slate-100"
+    >
+      <div className="mx-auto max-w-7xl px-4 pb-20 pt-5 sm:px-6">
+        <header className="mb-7 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="rounded-2xl bg-emerald-500 p-3 text-slate-950">
+              <UtensilsCrossed size={25} />
+            </div>
+            <div>
+              <h1 className="text-xl font-extrabold tracking-tight sm:text-2xl">{t.app}</h1>
+              <p className="text-xs text-slate-500 dark:text-slate-400">{t.subtitle}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => setPrefs((p) => ({ ...p, lang: lang === 'ar' ? 'en' : 'ar' }))}>
+              <Languages size={17} />
+              {lang === 'ar' ? 'English' : 'العربية'}
+            </Button>
+            <Button aria-label={t.dark} onClick={() => setPrefs((p) => ({ ...p, dark: !p.dark }))}>
+              {prefs.dark ? <Sun size={18} /> : <Moon size={18} />}
+            </Button>
+          </div>
+        </header>
+        {error && (
+          <div
+            role="alert"
+            className="mb-5 flex items-start justify-between gap-3 rounded-2xl bg-rose-100 p-4 text-rose-800 dark:bg-rose-950 dark:text-rose-200"
+          >
+            <span>{error}</span>
+            <button onClick={() => setError('')}>
+              <X size={18} />
+            </button>
+          </div>
+        )}
+        {!plan ? (
+          <section className="mx-auto mt-16 max-w-2xl rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-3xl bg-emerald-500/10 text-emerald-500">
+              <FileText size={32} />
+            </div>
+            <h2 className="mb-3 text-2xl font-bold">{t.planMissing}</h2>
+            <p className="mb-7 text-slate-500 dark:text-slate-400">{t.planMissingText}</p>
+            <div className="flex flex-wrap justify-center gap-3">
+              <Button variant="primary" onClick={() => setModal('import')}>
+                <CloudUpload size={17} />
+                {t.upload}
+              </Button>
+              <Button onClick={() => preview(samplePlan())}>
+                <ClipboardList size={17} />
+                {t.sample}
+              </Button>
+            </div>
+          </section>
+        ) : (
+          <>
+            <section className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+              <div className="rounded-3xl bg-gradient-to-br from-slate-900 to-slate-800 p-5 text-white shadow-xl sm:p-7">
+                <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm text-emerald-300">{t.plan}</p>
+                    <h2 className="mt-1 text-xl font-extrabold sm:text-2xl">{plan.name}</h2>
+                    <p className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                      <Check size={14} />
+                      {t.persist}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={() => setModal('import')}>
+                      <ArrowLeftRight size={16} />
+                      {t.replace}
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                  <div className="rounded-2xl bg-white/10 p-4">
+                    <div className="text-xs text-slate-300">{t.total}</div>
+                    <div className="mt-1 text-2xl font-bold text-emerald-300">
+                      {totals.goal ? Math.round((totals.eaten / totals.goal) * 100) : 0}%
+                    </div>
+                  </div>
+                  <div className="rounded-2xl bg-white/10 p-4">
+                    <div className="text-xs text-slate-300">{t.eaten}</div>
+                    <div className="mt-1 text-2xl font-bold">
+                      {number(totals.eaten)} <span className="text-sm">{t.grams}</span>
+                    </div>
+                  </div>
+                  <div className="col-span-2 rounded-2xl bg-white/10 p-4 sm:col-span-1">
+                    <div className="text-xs text-slate-300">{t.complete}</div>
+                    <div className="mt-1 text-2xl font-bold">
+                      {number(totals.completed)} / {number(rows.length)}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <Progress eaten={totals.eaten} total={totals.goal} />
+                </div>
+              </div>
+              <div className="flex flex-col justify-between rounded-3xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                <div>
+                  <p className="mb-2 flex items-center gap-2 text-sm font-bold">
+                    <CalendarDays size={18} className="text-emerald-500" />
+                    {t.weekday}
+                  </p>
+                  <p className="mb-4 text-lg font-semibold">{displayDate}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    aria-label={t.previous}
+                    className="flex-1"
+                    onClick={() => setDay((d) => moveDay(d, -1))}
+                  >
+                    {lang === 'ar' ? <ChevronRight size={19} /> : <ChevronLeft size={19} />}
+                  </Button>
+                  <Button className="flex-[3]" onClick={() => setDay(dateKey(new Date()))}>
+                    {t.today}
+                  </Button>
+                  <Button
+                    aria-label={t.next}
+                    className="flex-1"
+                    onClick={() => setDay((d) => moveDay(d, 1))}
+                  >
+                    {lang === 'ar' ? <ChevronLeft size={19} /> : <ChevronRight size={19} />}
+                  </Button>
+                </div>
+                <input
+                  aria-label={t.weekday}
+                  dir="ltr"
+                  type="date"
+                  value={day}
+                  onChange={(e) => e.target.value && setDay(e.target.value)}
+                  className="mt-3 w-full rounded-xl border border-slate-200 bg-transparent p-2 dark:border-slate-700"
+                />
+                <Button
+                  variant="danger"
+                  className="mt-3"
+                  onClick={() => {
+                    if (ask(t.confirmReset)) commitLog({});
+                  }}
+                >
+                  <RotateCcw size={15} />
+                  {t.resetDay}
+                </Button>
+              </div>
+            </section>
+            <div className="mb-4 flex items-center gap-2">
+              <Activity className="text-emerald-500" size={21} />
+              <h2 className="text-xl font-bold">{t.meals}</h2>
+            </div>
+            <div className="grid gap-5">
+              {plan.meals.map((meal, mi) => {
+                const mealRows = rows.filter((r) => r.meal.id === meal.id);
+                const mealGoal = mealRows.reduce((sum, r) => sum + r.goal, 0),
+                  mealEaten = mealRows.reduce((sum, r) => sum + r.eaten, 0);
+                return (
+                  <article
+                    key={meal.id}
+                    className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900"
+                  >
+                    <div className="bg-slate-100 px-5 py-4 dark:bg-slate-800/70">
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-extrabold">
+                          {t[meal.kind] || meal.kind}
+                          {plan.meals.filter((m) => m.kind === meal.kind).length > 1
+                            ? ` · ${plan.meals.slice(0, mi + 1).filter((m) => m.kind === meal.kind).length}`
+                            : ''}
+                        </h3>
+                        <span className="text-xs font-semibold text-slate-500 dark:text-slate-300">
+                          {number(mealEaten)} / {number(mealGoal)} {t.grams}
+                        </span>
+                      </div>
+                      {meal.note && (
+                        <p className="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-300">
+                          {meal.note}
+                        </p>
+                      )}
+                      <div className="mt-3">
+                        <Progress eaten={mealEaten} total={mealGoal} />
+                      </div>
+                    </div>
+                    <div className="divide-y divide-slate-100 px-4 dark:divide-slate-800">
+                      {mealRows.map((row) => {
+                        const done = row.goal > 0 && row.eaten >= row.goal,
+                          partial = row.eaten > 0 && !done;
+                        return (
+                          <div key={row.slot.id} className="py-4">
+                            <div className="flex items-start gap-3">
+                              <button
+                                onClick={() => openEntry(row)}
+                                aria-label={t.edit}
+                                className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${done ? 'bg-emerald-500/15 text-emerald-500' : partial ? 'bg-indigo-500/15 text-indigo-500' : 'bg-slate-100 text-slate-400 dark:bg-slate-800'}`}
+                              >
+                                {done ? <CheckCheck size={19} /> : <Pencil size={17} />}
+                              </button>
+                              <div className="min-w-0 flex-1">
+                                <button
+                                  className={`text-start font-bold ${done ? 'text-emerald-600 dark:text-emerald-400' : ''}`}
+                                  onClick={() => openEntry(row)}
+                                >
+                                  {row.option.name}
+                                </button>
+                                <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                  {number(row.eaten)} / {number(row.goal)} {t.grams} ·{' '}
+                                  <span
+                                    className={
+                                      done ? 'text-emerald-500' : partial ? 'text-indigo-500' : ''
+                                    }
+                                  >
+                                    {done ? t.complete : partial ? t.partial : t.notStarted}
+                                  </span>
+                                </div>
+                                <div className="mt-2">
+                                  <Progress eaten={row.eaten} total={row.goal} />
+                                </div>
+                                {row.slot.alternatives?.length > 0 && (
+                                  <select
+                                    aria-label={t.alternatives}
+                                    title={row.eaten > 0 ? t.locked : undefined}
+                                    disabled={row.eaten > 0}
+                                    value={row.option.id}
+                                    onChange={(e) => chooseOption(row.slot, e.target.value)}
+                                    className="mt-3 max-w-full rounded-lg border disabled:cursor-not-allowed disabled:opacity-60 border-slate-200 bg-slate-50 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-800"
+                                  >
+                                    <option value={row.slot.primary.id}>
+                                      {t.primary}: {row.slot.primary.name} (
+                                      {number(row.slot.primary.grams)} {t.grams})
+                                    </option>
+                                    {row.slot.alternatives.map((alt) => (
+                                      <option value={alt.id} key={alt.id}>
+                                        {alt.name} ({number(alt.grams)} {t.grams})
+                                      </option>
+                                    ))}
+                                  </select>
+                                )}
+                              </div>
+                              <div
+                                className={`shrink-0 rounded-xl px-3 py-1.5 text-center ${done ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'}`}
+                              >
+                                <div className="text-lg font-extrabold leading-tight">
+                                  {number(row.goal - row.eaten)}{' '}
+                                  <span className="text-xs font-semibold">{t.grams}</span>
+                                </div>
+                                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                                  {t.left}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+            <section className="mt-8 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-7">
+              <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="flex items-center gap-2 text-xl font-extrabold">
+                    <Leaf size={22} className="text-emerald-500" />
+                    {t.remaining}
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                    {t.remainingHelp}
+                  </p>
+                </div>
+                {remaining.length > 0 && (
+                  <Button variant="primary" onClick={eatRemaining}>
+                    <CheckCheck size={17} />
+                    {t.eatAll}
+                  </Button>
+                )}
+              </div>
+              {remaining.length === 0 ? (
+                <div className="rounded-2xl bg-emerald-500/10 p-8 text-center font-semibold text-emerald-600 dark:text-emerald-300">
+                  <CheckCheck size={30} className="mx-auto mb-3" />
+                  {t.allDone}
+                </div>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {remaining.map((row) => (
+                    <button
+                      onClick={() => openEntry(row)}
+                      key={row.slot.id}
+                      className="rounded-2xl border border-slate-200 p-4 text-start transition hover:border-emerald-500 dark:border-slate-700"
+                    >
+                      <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
+                        {t[row.meal.kind]}
+                      </p>
+                      <p className="font-bold">{row.option.name}</p>
+                      <div className="mt-2 text-xl font-extrabold text-emerald-600 dark:text-emerald-400">
+                        {number(row.goal - row.eaten)} <span className="text-sm">{t.grams}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+            {plan.notes && (
+              <p className="mt-6 rounded-2xl border border-amber-500/25 bg-amber-500/10 p-4 text-xs leading-6 text-amber-800 dark:text-amber-200">
+                {plan.notes}
+              </p>
+            )}
+          </>
+        )}
+        <footer className="mt-10 text-center text-xs text-slate-500">{t.local}</footer>
+      </div>
+      {modal === 'import' && (
+        <Modal title={plan ? t.replace : t.upload} onClose={() => setModal(null)} wide>
+          <div className="space-y-5">
+            <p className="rounded-xl bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+              {t.pdfWarning} {plan && t.replaceOnly}
+            </p>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              onChange={fromFile}
+              className="hidden"
+            />
+            <Button variant="primary" disabled={busy} onClick={() => fileRef.current?.click()}>
+              <CloudUpload size={18} />
+              {busy ? t.loading : t.browse}
+            </Button>
+            <div>
+              <label className="mb-2 block text-sm font-bold">{t.sourceText}</label>
+              <textarea
+                dir="auto"
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                placeholder={t.hint}
+                rows={12}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 p-4 outline-none focus:border-emerald-500 dark:border-slate-700 dark:bg-slate-800"
+              />
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button onClick={() => preview(samplePlan())}>{t.sample}</Button>
+              <Button variant="primary" disabled={!textInput.trim() || busy} onClick={fromText}>
+                <Search size={16} />
+                {t.parseText}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {modal === 'review' && draft && (
+        <Modal title={t.review} onClose={() => setModal(null)} wide>
+          <div className="space-y-5">
+            <p className="text-sm text-slate-500 dark:text-slate-400">{t.reviewDescription}</p>
+            <MealEditor draft={draft} setDraft={setDraft} t={t} />
+            {rawExtracted && (
+              <details className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                <summary className="cursor-pointer font-semibold">{t.issues}</summary>
+                <pre dir="auto" className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap text-xs">
+                  {rawExtracted}
+                </pre>
+              </details>
+            )}
+            <div className="sticky bottom-0 flex justify-end gap-3 bg-white py-3 dark:bg-slate-900">
+              <Button onClick={() => setModal(null)}>{t.cancel}</Button>
+              <Button
+                variant="primary"
+                disabled={
+                  !validatePlan(draft) ||
+                  draft.meals.some((m) =>
+                    m.slots?.some(
+                      (s) =>
+                        !s.primary.name.trim() ||
+                        s.primary.grams <= 0 ||
+                        s.alternatives.some((a) => !a.name.trim() || a.grams <= 0),
+                    ),
+                  )
+                }
+                onClick={() => replacePlan(draft)}
+              >
+                <Save size={17} />
+                {t.import}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {modal === 'log' &&
+        editing &&
+        (() => {
+          const row = rows.find((r) => r.slot.id === editing.slotId);
+          if (!row) return null;
+          const opt =
+            [row.slot.primary, ...row.slot.alternatives].find((o) => o.id === editing.optionId) ||
+            row.slot.primary;
+          return (
+            <Modal title={t.edit} onClose={() => setModal(null)}>
+              <div className="space-y-5">
+                <div className="space-y-2">
+                  <label className="font-semibold">{t.selected}</label>
+                  <select
+                    disabled={row.eaten > 0}
+                    value={editing.optionId}
+                    onChange={(e) =>
+                      setEditing((old) => ({ ...old, optionId: e.target.value, eaten: 0 }))
+                    }
+                    className="w-full rounded-xl border disabled:cursor-not-allowed disabled:opacity-60 border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800"
+                  >
+                    <option value={row.slot.primary.id}>
+                      {row.slot.primary.name} — {number(row.slot.primary.grams)} {t.grams}
+                    </option>
+                    {row.slot.alternatives.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name} — {number(a.grams)} {t.grams}
+                      </option>
+                    ))}
+                  </select>
+                  {row.eaten > 0 && row.slot.alternatives.length > 0 && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400">{t.locked}</p>
+                  )}
+                </div>
+                <div>
+                  <label className="mb-2 block font-semibold">
+                    {t.consumed} ({t.grams})
+                  </label>
+                  <Field
+                    type="number"
+                    min="0"
+                    max={opt.grams}
+                    value={editing.eaten}
+                    onChange={(v) =>
+                      setEditing((old) => ({ ...old, eaten: clamp(v, 0, opt.grams) }))
+                    }
+                  />
+                  <input
+                    aria-label={t.consumed}
+                    className="mt-5 w-full accent-emerald-500"
+                    type="range"
+                    min="0"
+                    max={opt.grams}
+                    step={1}
+                    value={editing.eaten}
+                    onChange={(e) => setEditing((old) => ({ ...old, eaten: +e.target.value }))}
+                  />
+                  <div className="mt-3 flex justify-between text-sm text-slate-500">
+                    <span>
+                      {number(editing.eaten)} {t.grams}
+                    </span>
+                    <span>
+                      {number(opt.grams)} {t.grams}
+                    </span>
+                  </div>
+                  <div className="mt-3">
+                    <Progress eaten={editing.eaten} total={opt.grams} />
+                  </div>
+                </div>
+                <Button
+                  className="w-full"
+                  onClick={() => setEditing((old) => ({ ...old, eaten: opt.grams }))}
+                >
+                  <CheckCheck size={17} />
+                  {t.markComplete}
+                </Button>
+                <div className="flex justify-end gap-2">
+                  <Button onClick={() => setModal(null)}>{t.cancel}</Button>
+                  <Button variant="primary" onClick={saveEntry}>
+                    <Save size={17} />
+                    {t.save}
+                  </Button>
+                </div>
+              </div>
+            </Modal>
+          );
+        })()}
+      {/*{modal === 'guide' && <Modal title={t.guide} onClose={() => setModal(null)} wide><DeploymentGuide lang={lang}/></Modal>}*/}
+    </div>
+  );
+}
