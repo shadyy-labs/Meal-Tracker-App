@@ -1407,8 +1407,10 @@ export default function App() {
                     min="0"
                     max={opt.grams}
                     value={editing.eaten}
+                    onFocus={(e) => e.target.select()}
                     onChange={(v) =>
-                      setEditing((old) => ({ ...old, eaten: clamp(v, 0, opt.grams) }))
+                      // Keep '' while typing so the field can be cleared; saveEntry clamps it to 0.
+                      setEditing((old) => ({ ...old, eaten: v === '' ? '' : clamp(v, 0, opt.grams) }))
                     }
                   />
                   <input
@@ -1418,19 +1420,19 @@ export default function App() {
                     min="0"
                     max={opt.grams}
                     step={1}
-                    value={editing.eaten}
+                    value={+editing.eaten || 0}
                     onChange={(e) => setEditing((old) => ({ ...old, eaten: +e.target.value }))}
                   />
                   <div className="mt-3 flex justify-between text-sm text-slate-500">
                     <span>
-                      {number(editing.eaten)} {t.grams}
+                      {number(+editing.eaten || 0)} {t.grams}
                     </span>
                     <span>
                       {number(opt.grams)} {t.grams}
                     </span>
                   </div>
                   <div className="mt-3">
-                    <Progress eaten={editing.eaten} total={opt.grams} />
+                    <Progress eaten={+editing.eaten || 0} total={opt.grams} />
                   </div>
                 </div>
                 <Button
