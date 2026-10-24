@@ -1,3 +1,8 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
 :root { font-family: Tahoma, Arial, sans-serif; }
+
+@keyframes pdf-scan {
+  from { transform: translateY(-100%); }
+  to { transform: translateY(300%); }
+}

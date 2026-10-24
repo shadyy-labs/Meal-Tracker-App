@@ -18,13 +18,13 @@ import {
   FileText,
   Github,
   Languages,
+  LoaderCircle,
   Leaf,
   Moon,
   Pencil,
   Plus,
   RotateCcw,
   Save,
-  Search,
   Settings2,
   Split,
   ShieldAlert,
@@ -40,7 +40,6 @@ import {
   makeOption,
   makeSlot,
   parseMealSections,
-  parseMealText,
   parseNutritionPdf,
   stripReviewFlags,
   uid,
@@ -101,7 +100,6 @@ const translations = {
     upload: 'استيراد خطة PDF',
     replace: 'استبدال الخطة',
     removePlan: 'حذف الخطة',
-    confirmRemove: 'حذف الخطة سيمسح الخطة وجميع سجلات الأيام نهائيًا. هل تريد المتابعة؟',
     welcome: 'مرحبًا بك في متتبع الخطة الغذائية',
     welcomeText:
       'استورد خطتك الغذائية مرة واحدة، ثم سجّل ما تتناوله يوميًا بالجرام وتابع ما تبقى من كل وجبة.',
@@ -138,12 +136,9 @@ const translations = {
     review: 'مراجعة الخطة المستخرجة',
     reviewDescription: 'راجع الأطعمة والأوزان والبدائل قبل تثبيت الخطة.',
     import: 'تثبيت الخطة',
-    sourceText: 'الصق النص',
     selectPDF: 'اختر PDF',
-    parseText: 'استخراج من النص',
     warning:
       'تعذر اكتشاف وجبات واضحة. جرب فصل أسماء الوجبات ووضع الوزن بجانب الصنف، ثم راجع النتائج.',
-    loading: 'جاري قراءة PDF...',
     confirmAll: 'تسجيل جميع الكميات المتبقية لهذا اليوم كمتناولة؟',
     confirmReset: 'مسح تسجيلات هذا اليوم فقط؟',
     resetDay: 'تصفير اليوم',
@@ -185,7 +180,11 @@ const translations = {
     resetWarning: 'ستتغير الكميات اليومية فقط؛ لن تتغير خطتك الأساسية.',
     replaceOnly: 'لا يتم تغيير الخطة إلا عند تأكيد الاستبدال.',
     browse: 'اختيار ملف',
-    hint: 'مثال: Breakfast ثم 60 جم توست بني ثم البدائل ثم 50 جم تورتيلا',
+    extracting: 'جاري استخراج خطتك',
+    stepRead: 'قراءة صفحات ملف PDF',
+    stepText: 'إعادة بناء النص العربي',
+    stepMeals: 'تحديد الوجبات والكميات',
+    stepAlternatives: 'ربط البدائل بالأصناف',
     cannotExtract: 'تعذر استخراج نص من هذا PDF. قد يكون ممسوحًا ضوئيًا.',
     weekday: 'تاريخ المتابعة',
   },
@@ -201,7 +200,6 @@ const translations = {
     upload: 'Import PDF plan',
     replace: 'Replace plan',
     removePlan: 'Remove plan',
-    confirmRemove: 'Removing the plan permanently deletes the plan and all daily logs. Continue?',
     welcome: 'Welcome to Meal Plan Tracker',
     welcomeText:
       'Import your nutrition plan once, then log what you eat each day in grams and see exactly what is left of every meal.',
@@ -238,12 +236,9 @@ const translations = {
     review: 'Review extracted plan',
     reviewDescription: 'Verify foods, gram targets, and alternatives before applying.',
     import: 'Apply plan',
-    sourceText: 'Paste text',
     selectPDF: 'Choose PDF',
-    parseText: 'Extract text',
     warning:
       'No recognizable meal items found. Try adding explicit meal headings and weights, then review.',
-    loading: 'Reading PDF...',
     confirmAll: 'Mark every remaining gram for today as eaten?',
     confirmReset: 'Clear only today’s consumption logs?',
     resetDay: 'Reset today',
@@ -287,7 +282,11 @@ const translations = {
     resetWarning: 'Only your daily logs change; the master plan remains fixed.',
     replaceOnly: 'Your plan is changed only after you confirm replacement.',
     browse: 'Choose file',
-    hint: 'Example: Breakfast, 60 g brown toast, Alternatives, 50 g tortilla',
+    extracting: 'Extracting your plan',
+    stepRead: 'Reading the PDF pages',
+    stepText: 'Rebuilding the Arabic text',
+    stepMeals: 'Detecting meals and gram targets',
+    stepAlternatives: 'Matching alternatives to items',
     cannotExtract: 'No text could be extracted. This PDF may be scanned.',
     weekday: 'Tracking date',
   },
@@ -344,6 +343,71 @@ function Progress({ eaten, total }) {
         className={`h-full rounded-full transition-all duration-300 ${ratio >= 1 ? 'bg-emerald-500' : ratio > 0 ? 'bg-indigo-500' : 'bg-slate-300 dark:bg-slate-600'}`}
         style={{ width: `${ratio * 100}%` }}
       />
+    </div>
+  );
+}
+// Shown while a PDF is being extracted. Steps advance on a timer and the import
+// waits at least EXTRACTION_MIN_MS, so the sequence is visible even for fast files.
+const EXTRACTION_STEPS = ['stepRead', 'stepText', 'stepMeals', 'stepAlternatives'];
+const EXTRACTION_STEP_MS = 850;
+const EXTRACTION_MIN_MS = EXTRACTION_STEP_MS * EXTRACTION_STEPS.length + 400;
+function ExtractionProgress({ t, fileName }) {
+  const [step, setStep] = useState(0);
+  useEffect(() => {
+    const id = setInterval(
+      () => setStep((s) => Math.min(s + 1, EXTRACTION_STEPS.length - 1)),
+      EXTRACTION_STEP_MS,
+    );
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 p-5 text-white shadow-xl sm:p-6"
+    >
+      <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-center">
+        <div className="relative h-28 w-22 shrink-0 overflow-hidden rounded-xl border border-white/15 bg-white/5 p-3">
+          <div className="mb-3 h-2 w-2/3 rounded-full bg-emerald-400/70" />
+          {[100, 85, 95, 70, 90, 60].map((w, i) => (
+            <div
+              key={i}
+              className="mb-2 h-1.5 rounded-full bg-white/25 motion-safe:animate-pulse"
+              style={{ width: `${w}%`, animationDelay: `${i * 150}ms` }}
+            />
+          ))}
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-transparent via-emerald-400/45 to-transparent motion-safe:animate-[pdf-scan_1.8s_ease-in-out_infinite]" />
+        </div>
+        <div className="w-full min-w-0 flex-1">
+          <p className="text-lg font-extrabold">{t.extracting}</p>
+          <p dir="auto" className="truncate text-xs text-slate-400">
+            {fileName}
+          </p>
+          <ol className="mt-4 space-y-2.5">
+            {EXTRACTION_STEPS.map((key, i) => (
+              <li
+                key={key}
+                className={`flex items-center gap-2.5 text-sm transition-colors duration-300 ${i < step ? 'text-emerald-300' : i === step ? 'text-white' : 'text-slate-500'}`}
+              >
+                {i < step ? (
+                  <Check size={16} />
+                ) : i === step ? (
+                  <LoaderCircle size={16} className="motion-safe:animate-spin" />
+                ) : (
+                  <span className="mx-1.5 h-1.5 w-1.5 rounded-full bg-current" />
+                )}
+                {t[key]}
+              </li>
+            ))}
+          </ol>
+          <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full rounded-full bg-emerald-400 transition-all duration-700 ease-out"
+              style={{ width: `${((step + 1) / EXTRACTION_STEPS.length) * 92}%` }}
+            />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -572,10 +636,9 @@ export default function App() {
   const [log, setLog] = useState(() => readJSON(DAY_PREFIX + dateKey(new Date()), {}));
   const [modal, setModal] = useState(null); // import, review, log
   const [draft, setDraft] = useState(null);
-  const [textInput, setTextInput] = useState('');
   const [rawExtracted, setRawExtracted] = useState('');
   const [reparse, setReparse] = useState(null); // re-parses the source for another day plan
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(''); // name of the PDF being extracted
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
   const fileRef = useRef(null);
@@ -642,7 +705,6 @@ export default function App() {
     }
   };
   const removePlan = () => {
-    if (!ask(t.confirmRemove)) return;
     clearDailyLogs();
     localStorage.removeItem(PLAN_KEY);
     setPlan(null);
@@ -672,21 +734,18 @@ export default function App() {
     setError('');
     setModal('review');
   };
-  const fromText = () => {
-    const source = textInput;
-    const value = parseMealText(source);
-    setRawExtracted(source);
-    setReparse(() => (day) => parseMealText(source, { day }));
-    preview(value);
-  };
   const fromFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setBusy(true);
+    setBusy(file.name);
     setError('');
     try {
+      const started = Date.now();
       const { text: raw, lines, plan: value } = await parseNutritionPdf(file);
-      setTextInput(raw);
+      // Let the extraction animation play through before the review opens.
+      await new Promise((r) =>
+        setTimeout(r, Math.max(0, EXTRACTION_MIN_MS - (Date.now() - started))),
+      );
       setRawExtracted(raw);
       if (!raw.trim()) throw new Error(t.cannotExtract);
       const name = file.name.replace(/\.pdf$/i, '');
@@ -697,7 +756,7 @@ export default function App() {
       setError(`${err.message}. ${t.pdfWarning}`);
       setModal('import');
     } finally {
-      setBusy(false);
+      setBusy('');
       e.target.value = '';
     }
   };
@@ -1081,27 +1140,14 @@ export default function App() {
               onChange={fromFile}
               className="hidden"
             />
-            <Button variant="primary" disabled={busy} onClick={() => fileRef.current?.click()}>
-              <CloudUpload size={18} />
-              {busy ? t.loading : t.browse}
-            </Button>
-            <div>
-              <label className="mb-2 block text-sm font-bold">{t.sourceText}</label>
-              <textarea
-                dir="auto"
-                value={textInput}
-                onChange={(e) => setTextInput(e.target.value)}
-                placeholder={t.hint}
-                rows={12}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 p-4 outline-none focus:border-emerald-500 dark:border-slate-700 dark:bg-slate-800"
-              />
-            </div>
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button variant="primary" disabled={!textInput.trim() || busy} onClick={fromText}>
-                <Search size={16} />
-                {t.parseText}
+            {busy ? (
+              <ExtractionProgress t={t} fileName={busy} />
+            ) : (
+              <Button variant="primary" onClick={() => fileRef.current?.click()}>
+                <CloudUpload size={18} />
+                {t.browse}
               </Button>
-            </div>
+            )}
           </div>
         </Modal>
       )}
