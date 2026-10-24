@@ -133,84 +133,6 @@ function makeSlot(name, grams, alternatives = []) {
 function makeMeal(kind, note = '') {
   return { id: uid(), kind, note, slots: [] };
 }
-const samplePlan = () => ({
-  id: uid(),
-  name: 'Shady Walid — Diet Week 2–3',
-  createdAt: new Date().toISOString(),
-  origin: 'sample',
-  notes:
-    'جميع أوزان الطعام بعد الطهي. يرجى مراجعة الخطة الأصلية. ملحوظة: المكمل الغذائي يمكن أن يحل محل 80 جم من صدور دجاج الغداء، وليس إضافة تلقائية.',
-  meals: [
-    {
-      ...makeMeal('breakfast'),
-      slots: [
-        makeSlot('توست بني', 60, [['تورتيلا', 50]]),
-        makeSlot('بيض مسلوق كامل', 110),
-        makeSlot('جبنة قريش', 50, [['جبنة الشيدر خالية من الدهون', 30]]),
-        makeSlot('خس', 100),
-      ],
-    },
-    {
-      ...makeMeal('snack', 'اللوز ني غير مملح — طحن الشوفان وعمل بان كيك صحي'),
-      slots: [
-        makeSlot('شوفان سريع الطهي من لينو', 30),
-        makeSlot('بيض كامل', 55),
-        makeSlot('لبن خالي من الدسم', 240),
-        makeSlot('خلاصة الفانيليا', 5),
-        makeSlot('بيكنج بودر', 5),
-        makeSlot('موز', 100, [
-          ['تفاح', 150],
-          ['فراولة', 280],
-        ]),
-        makeSlot('لوز', 30),
-      ],
-    },
-    {
-      ...makeMeal('lunch', 'المكرونة مرتين فقط في الأسبوع، واللحم الأحمر مرتين في الأسبوع'),
-      slots: [
-        makeSlot('أرز بسمتي مسلوق', 150, [
-          ['أرز بني مطهي', 150],
-          ['مكرونة القمح الكامل مطهية', 120],
-        ]),
-        makeSlot('صدر دجاج مشوي - لحم فقط', 180, [
-          ['بوري مشوي', 180],
-          ['ستيك بقري مشوي', 180],
-          ['سمك بلطي مشوي', 180],
-          ['كفتة مشوية', 180],
-        ]),
-        makeSlot('سلطة (طماطم وجزر وفلفل وخيار)', 200),
-        makeSlot('زيت الزيتون', 5),
-      ],
-    },
-    {
-      ...makeMeal('snack', 'قبل التمرين بنصف ساعة'),
-      slots: [
-        makeSlot('موز', 100, [
-          ['بطاطا حلوة مشوية', 100],
-          ['بلح - تمر مجفف', 30],
-        ]),
-        makeSlot('شوكولاتة دارك 70%–85% كاكاو', 20),
-      ],
-    },
-    {
-      ...makeMeal('dinner', 'التونة مرتين فقط في الأسبوع — بعد التمرين مباشرة'),
-      slots: [
-        makeSlot('تورتيلا', 50),
-        makeSlot('صدر دجاج مشوي - لحم فقط', 100, [
-          ['سمك التونة الأبيض المعلب في الزيت - مصفى', 120],
-        ]),
-        makeSlot('خس', 100),
-      ],
-    },
-    {
-      ...makeMeal(
-        'supplements',
-        'يمكن استبدال 80 جم من صدور دجاج الغداء بسكوب واي بروتين. راجع هذا الاستبدال مع مدربك.',
-      ),
-      slots: [makeSlot('Limitless Alpha Concentrate Whey Protein', 33)],
-    },
-  ],
-});
 
 // Separately detect headers and keep repeated Snacks as distinct meal sections.
 function parseMealText(input) {
@@ -377,10 +299,20 @@ const translations = {
     eatAll: 'تسجيل تناول كل المتبقي',
     upload: 'استيراد خطة PDF',
     replace: 'استبدال الخطة',
-    sample: 'تحميل الخطة التجريبية',
-    planMissing: 'ابدأ بخطة غذائية',
-    planMissingText:
-      'ارفع ملف PDF أو الصق نص الخطة، أو جرب المثال المأخوذ من ملف شادي وليد المرفق.',
+    removePlan: 'حذف الخطة',
+    confirmRemove: 'حذف الخطة سيمسح الخطة وجميع سجلات الأيام نهائيًا. هل تريد المتابعة؟',
+    welcome: 'مرحبًا بك في متتبع الخطة الغذائية',
+    welcomeText:
+      'استورد خطتك الغذائية مرة واحدة، ثم سجّل ما تتناوله يوميًا بالجرام وتابع ما تبقى من كل وجبة.',
+    getStarted: 'ابدأ باستيراد خطتك',
+    featureImport: 'استيراد الخطة',
+    featureImportText: 'ارفع ملف PDF أو الصق نص الخطة وراجعه قبل التثبيت.',
+    featureLog: 'تسجيل دقيق',
+    featureLogText: 'سجّل الكمية التي تناولتها من كل صنف بالجرام.',
+    featureLeft: 'المتبقي',
+    featureLeftText: 'اعرف كم تبقى من كل صنف ومن كل وجبة.',
+    featureAlt: 'البدائل',
+    featureAltText: 'اختر بديلًا لأي صنف قبل أن تبدأ في تناوله.',
     plan: 'الخطة الأساسية',
     persist: 'تبقى الخطة كما هي عند تغيير التاريخ',
     eaten: 'المتناول',
@@ -462,10 +394,20 @@ const translations = {
     eatAll: 'Mark all remaining as eaten',
     upload: 'Import PDF plan',
     replace: 'Replace plan',
-    sample: 'Load sample plan',
-    planMissing: 'Start with a meal plan',
-    planMissingText:
-      'Upload a PDF, paste plan text, or try the sample based on your attached Shady Walid plan.',
+    removePlan: 'Remove plan',
+    confirmRemove: 'Removing the plan permanently deletes the plan and all daily logs. Continue?',
+    welcome: 'Welcome to Meal Plan Tracker',
+    welcomeText:
+      'Import your nutrition plan once, then log what you eat each day in grams and see exactly what is left of every meal.',
+    getStarted: 'Get started — import your plan',
+    featureImport: 'Import your plan',
+    featureImportText: 'Upload a PDF or paste the plan text, then review it before applying.',
+    featureLog: 'Precise logging',
+    featureLogText: 'Log the grams you ate for every item.',
+    featureLeft: 'Grams left',
+    featureLeftText: 'See what remains for each item and each meal.',
+    featureAlt: 'Alternatives',
+    featureAltText: 'Swap any item for an alternative before you start eating it.',
     plan: 'Master plan',
     persist: 'Plan stays fixed when you change dates',
     eaten: 'Eaten',
@@ -822,17 +764,28 @@ export default function App() {
     year: 'numeric',
   }).format(new Date(`${day}T12:00:00`));
   const ask = (message) => window.confirm(message);
+  const clearDailyLogs = () => {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(DAY_PREFIX)) localStorage.removeItem(key);
+    }
+  };
+  const removePlan = () => {
+    if (!ask(t.confirmRemove)) return;
+    clearDailyLogs();
+    localStorage.removeItem(PLAN_KEY);
+    setPlan(null);
+    setLog({});
+    setModal(null);
+    setError('');
+  };
   const replacePlan = (value) => {
     if (!validatePlan(value)) {
       setError(t.warning);
       return;
     }
     if (plan && !ask(t.confirmReplace)) return;
-    if (plan)
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const key = localStorage.key(i);
-        if (key?.startsWith(DAY_PREFIX)) localStorage.removeItem(key);
-      }
+    if (plan) clearDailyLogs();
     localStorage.setItem(PLAN_KEY, JSON.stringify(value));
     setPlan(value);
     setLog({});
@@ -950,21 +903,36 @@ export default function App() {
           </div>
         )}
         {!plan ? (
-          <section className="mx-auto mt-16 max-w-2xl rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-3xl bg-emerald-500/10 text-emerald-500">
-              <FileText size={32} />
-            </div>
-            <h2 className="mb-3 text-2xl font-bold">{t.planMissing}</h2>
-            <p className="mb-7 text-slate-500 dark:text-slate-400">{t.planMissingText}</p>
-            <div className="flex flex-wrap justify-center gap-3">
+          <section className="mx-auto mt-10 max-w-4xl">
+            <div className="rounded-3xl bg-gradient-to-br from-slate-900 to-slate-800 p-8 text-center text-white shadow-xl sm:p-12">
+              <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-3xl bg-emerald-500 text-slate-950">
+                <UtensilsCrossed size={32} />
+              </div>
+              <h2 className="mb-3 text-3xl font-extrabold tracking-tight sm:text-4xl">{t.welcome}</h2>
+              <p className="mx-auto mb-8 max-w-2xl text-slate-300">{t.welcomeText}</p>
               <Button variant="primary" onClick={() => setModal('import')}>
-                <CloudUpload size={17} />
-                {t.upload}
+                <CloudUpload size={18} />
+                {t.getStarted}
               </Button>
-              <Button onClick={() => preview(samplePlan())}>
-                <ClipboardList size={17} />
-                {t.sample}
-              </Button>
+            </div>
+            <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                [FileText, t.featureImport, t.featureImportText],
+                [Pencil, t.featureLog, t.featureLogText],
+                [Leaf, t.featureLeft, t.featureLeftText],
+                [ArrowLeftRight, t.featureAlt, t.featureAltText],
+              ].map(([Icon, title, text]) => (
+                <div
+                  key={title}
+                  className="rounded-3xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"
+                >
+                  <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-500">
+                    <Icon size={20} />
+                  </div>
+                  <h3 className="mb-1 font-bold">{title}</h3>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">{text}</p>
+                </div>
+              ))}
             </div>
           </section>
         ) : (
@@ -984,6 +952,10 @@ export default function App() {
                     <Button onClick={() => setModal('import')}>
                       <ArrowLeftRight size={16} />
                       {t.replace}
+                    </Button>
+                    <Button variant="danger" onClick={removePlan}>
+                      <Trash2 size={16} />
+                      {t.removePlan}
                     </Button>
                   </div>
                 </div>
@@ -1249,7 +1221,6 @@ export default function App() {
               />
             </div>
             <div className="flex flex-wrap justify-end gap-2">
-              <Button onClick={() => preview(samplePlan())}>{t.sample}</Button>
               <Button variant="primary" disabled={!textInput.trim() || busy} onClick={fromText}>
                 <Search size={16} />
                 {t.parseText}
