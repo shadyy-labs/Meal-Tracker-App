@@ -26,6 +26,7 @@ import {
   RotateCcw,
   Save,
   Settings2,
+  ShieldCheck,
   Split,
   ShieldAlert,
   Sun,
@@ -165,8 +166,7 @@ const translations = {
     mergeIntoPrevious: 'اجعله بديلًا للصنف السابق',
     optionWeight: 'الوزن بالجرام',
     noMeals: 'لم يتم العثور على وجبات.',
-    pdfWarning:
-      'استخراج النص يعمل لملفات PDF النصية. الملفات المصورة تحتاج OCR خارجي أو لصق النص بعد تحويله.',
+    pdfWarning: 'يدعم الاستخراج ملفات PDF النصية. لا يمكن قراءة الملفات المصورة (الممسوحة ضوئيًا).',
     local: 'بياناتك محفوظة على هذا الجهاز فقط.',
     previous: 'اليوم السابق',
     next: 'اليوم التالي',
@@ -180,6 +180,13 @@ const translations = {
     resetWarning: 'ستتغير الكميات اليومية فقط؛ لن تتغير خطتك الأساسية.',
     replaceOnly: 'لا يتم تغيير الخطة إلا عند تأكيد الاستبدال.',
     browse: 'اختيار ملف',
+    dropTitle: 'اسحب ملف خطتك الغذائية وأفلته هنا',
+    dropSubtitle: 'أو اختر ملف PDF من جهازك',
+    dropRelease: 'أفلت الملف لبدء الاستخراج',
+    tagPdf: 'ملف PDF نصي',
+    tagLanguages: 'عربي وإنجليزي',
+    tagPrivate: 'تتم المعالجة على جهازك',
+    notPdf: 'يرجى اختيار ملف PDF.',
     extracting: 'جاري استخراج خطتك',
     stepRead: 'قراءة صفحات ملف PDF',
     stepText: 'إعادة بناء النص العربي',
@@ -267,8 +274,7 @@ const translations = {
     mergeIntoPrevious: 'Make it an alternative of the previous item',
     optionWeight: 'Weight in grams',
     noMeals: 'No meals detected.',
-    pdfWarning:
-      'Text-based PDFs are supported. Scanned/image-only PDFs need external OCR or manually pasted OCR text.',
+    pdfWarning: 'Text-based PDFs are supported. Scanned or image-only PDFs cannot be read.',
     local: 'Your data stays in this browser.',
     previous: 'Previous day',
     next: 'Next day',
@@ -282,6 +288,13 @@ const translations = {
     resetWarning: 'Only your daily logs change; the master plan remains fixed.',
     replaceOnly: 'Your plan is changed only after you confirm replacement.',
     browse: 'Choose file',
+    dropTitle: 'Drag and drop your nutrition plan',
+    dropSubtitle: 'or choose a PDF file from your device',
+    dropRelease: 'Release to start extracting',
+    tagPdf: 'Text-based PDF',
+    tagLanguages: 'Arabic & English',
+    tagPrivate: 'Processed on this device',
+    notPdf: 'Please choose a PDF file.',
     extracting: 'Extracting your plan',
     stepRead: 'Reading the PDF pages',
     stepText: 'Rebuilding the Arabic text',
@@ -299,7 +312,7 @@ const Button = ({ children, variant = 'secondary', className = '', ...props }) =
     {children}
   </button>
 );
-const Modal = ({ title, onClose, children, wide = false }) => (
+const Modal = ({ title, onClose, children, wide = false, width }) => (
   <div
     className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-3 sm:p-6"
     onMouseDown={(e) => e.target === e.currentTarget && onClose()}
@@ -308,7 +321,7 @@ const Modal = ({ title, onClose, children, wide = false }) => (
       role="dialog"
       aria-modal="true"
       aria-label={title}
-      className={`flex max-h-[94dvh] w-full ${wide ? 'max-w-5xl' : 'max-w-lg'} flex-col overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-slate-900`}
+      className={`flex max-h-[94dvh] w-full ${width ?? (wide ? 'max-w-5xl' : 'max-w-lg')} flex-col overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-slate-900`}
     >
       <header className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-slate-800">
         <h2 className="text-xl font-bold">{title}</h2>
@@ -346,6 +359,80 @@ function Progress({ eaten, total }) {
     </div>
   );
 }
+/** Stylised PDF page; `scanning` adds the pulsing lines and the moving scan bar. */
+function PdfSheet({ scanning = false }) {
+  return (
+    <div className="relative h-28 w-22 shrink-0 overflow-hidden rounded-xl border border-white/15 bg-white/5 p-3">
+      <div className="mb-3 h-2 w-2/3 rounded-full bg-emerald-400/70" />
+      {[100, 85, 95, 70, 90, 60].map((w, i) => (
+        <div
+          key={i}
+          className={`mb-2 h-1.5 rounded-full bg-white/25 ${scanning ? 'motion-safe:animate-pulse' : ''}`}
+          style={{ width: `${w}%`, animationDelay: `${i * 150}ms` }}
+        />
+      ))}
+      {scanning && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-transparent via-emerald-400/45 to-transparent motion-safe:animate-[pdf-scan_1.8s_ease-in-out_infinite]" />
+      )}
+    </div>
+  );
+}
+/** Import entry point: drop a PDF on the card or pick one with the button. */
+function ImportDropzone({ t, onPick, onFile }) {
+  const [over, setOver] = useState(false);
+  return (
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        setOver(true);
+      }}
+      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget) && setOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setOver(false);
+        const file = e.dataTransfer.files?.[0];
+        if (file) onFile(file);
+      }}
+      className="rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 p-2 text-white shadow-xl motion-safe:animate-[fade-in_300ms_ease-out]"
+    >
+      <div
+        className={`flex min-h-60 flex-col items-center justify-center gap-5 rounded-xl border-2 border-dashed px-5 py-7 text-center transition-colors duration-200 ${over ? 'border-emerald-400 bg-emerald-400/10' : 'border-white/15'}`}
+      >
+        <div
+          className={`relative transition-transform duration-300 ${over ? 'scale-110' : 'motion-safe:animate-[pdf-float_3s_ease-in-out_infinite]'}`}
+        >
+          <PdfSheet />
+          <span className="absolute -bottom-2 -end-2 rounded-full bg-emerald-500 p-1.5 text-slate-950 shadow-lg ring-4 ring-slate-900">
+            <CloudUpload size={16} />
+          </span>
+        </div>
+        <div>
+          <p className="text-lg font-extrabold">{over ? t.dropRelease : t.dropTitle}</p>
+          <p className="mt-1 text-sm text-slate-400">{t.dropSubtitle}</p>
+        </div>
+        <Button variant="primary" onClick={onPick}>
+          <CloudUpload size={18} />
+          {t.browse}
+        </Button>
+        <ul className="flex flex-wrap justify-center gap-2 text-xs text-slate-300">
+          {[
+            [FileText, t.tagPdf],
+            [Languages, t.tagLanguages],
+            [ShieldCheck, t.tagPrivate],
+          ].map(([Icon, label]) => (
+            <li
+              key={label}
+              className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1"
+            >
+              <Icon size={13} className="text-emerald-300" />
+              {label}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
 // Shown while a PDF is being extracted. Steps advance on a timer and the import
 // waits at least EXTRACTION_MIN_MS, so the sequence is visible even for fast files.
 const EXTRACTION_STEPS = ['stepRead', 'stepText', 'stepMeals', 'stepAlternatives'];
@@ -364,20 +451,10 @@ function ExtractionProgress({ t, fileName }) {
     <div
       role="status"
       aria-live="polite"
-      className="overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 p-5 text-white shadow-xl sm:p-6"
+      className="flex min-h-64 items-center overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 p-5 text-white shadow-xl motion-safe:animate-[fade-in_300ms_ease-out] sm:p-6"
     >
-      <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-center">
-        <div className="relative h-28 w-22 shrink-0 overflow-hidden rounded-xl border border-white/15 bg-white/5 p-3">
-          <div className="mb-3 h-2 w-2/3 rounded-full bg-emerald-400/70" />
-          {[100, 85, 95, 70, 90, 60].map((w, i) => (
-            <div
-              key={i}
-              className="mb-2 h-1.5 rounded-full bg-white/25 motion-safe:animate-pulse"
-              style={{ width: `${w}%`, animationDelay: `${i * 150}ms` }}
-            />
-          ))}
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-transparent via-emerald-400/45 to-transparent motion-safe:animate-[pdf-scan_1.8s_ease-in-out_infinite]" />
-        </div>
+      <div className="flex w-full flex-col items-center gap-6 sm:flex-row sm:items-center">
+        <PdfSheet scanning />
         <div className="w-full min-w-0 flex-1">
           <p className="text-lg font-extrabold">{t.extracting}</p>
           <p dir="auto" className="truncate text-xs text-slate-400">
@@ -734,9 +811,12 @@ export default function App() {
     setError('');
     setModal('review');
   };
-  const fromFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const fromFile = async (file) => {
+    if (busy) return;
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+      setError(t.notPdf);
+      return;
+    }
     setBusy(file.name);
     setError('');
     try {
@@ -757,7 +837,6 @@ export default function App() {
       setModal('import');
     } finally {
       setBusy('');
-      e.target.value = '';
     }
   };
   const openEntry = (row) => {
@@ -1128,26 +1207,39 @@ export default function App() {
         <footer className="mt-10 text-center text-xs text-slate-500">{t.local}</footer>
       </div>
       {modal === 'import' && (
-        <Modal title={plan ? t.replace : t.upload} onClose={() => setModal(null)} wide>
-          <div className="space-y-5">
-            <p className="rounded-xl bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
-              {t.pdfWarning} {plan && t.replaceOnly}
-            </p>
+        <Modal title={plan ? t.replace : t.upload} onClose={() => setModal(null)} width="max-w-2xl">
+          <div className="space-y-4">
             <input
               ref={fileRef}
               type="file"
               accept="application/pdf,.pdf"
-              onChange={fromFile}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (file) fromFile(file);
+              }}
               className="hidden"
             />
             {busy ? (
               <ExtractionProgress t={t} fileName={busy} />
             ) : (
-              <Button variant="primary" onClick={() => fileRef.current?.click()}>
-                <CloudUpload size={18} />
-                {t.browse}
-              </Button>
+              <ImportDropzone t={t} onPick={() => fileRef.current?.click()} onFile={fromFile} />
             )}
+            {error && !busy && (
+              <p
+                role="alert"
+                className="flex items-start gap-2 rounded-xl bg-rose-500/10 p-3 text-sm text-rose-700 dark:text-rose-300"
+              >
+                <TriangleAlert size={16} className="mt-0.5 shrink-0" />
+                {error}
+              </p>
+            )}
+            <p className="flex items-start gap-2 text-xs leading-5 text-slate-500 dark:text-slate-400">
+              <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+              <span>
+                {t.pdfWarning} {plan && t.replaceOnly}
+              </span>
+            </p>
           </div>
         </Modal>
       )}
