@@ -22,6 +22,7 @@ import {
   Leaf,
   Moon,
   Pencil,
+  Pill,
   Plus,
   RotateCcw,
   Save,
@@ -37,6 +38,7 @@ import {
 } from 'lucide-react';
 import {
   MEAL_TYPES,
+  applySupplementChoice,
   makeMeal,
   makeOption,
   makeSlot,
@@ -57,6 +59,8 @@ import {
 const PLAN_KEY = 'persistent_nutrition_plan';
 const DAY_PREFIX = 'daily_logs_';
 const SETTINGS_KEY = 'meal_tracker_settings';
+// Reserved key in a day's log: whether supplements (whey) are taken that day.
+const SUPPLEMENTS_LOG_KEY = '$supplements';
 const clamp = (v, low, high) => Math.min(high, Math.max(low, Number.isFinite(+v) ? +v : low));
 const dateKey = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -152,6 +156,11 @@ const translations = {
     dinner: 'العشاء',
     snack: 'سناك',
     supplements: 'المكملات',
+    takeWhey: 'سأتناول الواي بروتين اليوم',
+    wheyOn: (g, name) => `تم خصم ${g} جم من ${name} وبدائله مقابل سكوب الواي.`,
+    wheyOnNoTarget: 'لم يتم العثور على صدور دجاج لخصم الكمية منها.',
+    wheyOff: 'المكملات اختيارية — تم إخفاء بطاقتها لهذا اليوم.',
+    wheySwap: (g) => `−${g} جم للواي`,
     mealNote: 'ملاحظة الوجبة',
     planName: 'اسم الخطة',
     addMeal: 'إضافة وجبة',
@@ -259,6 +268,11 @@ const translations = {
     dinner: 'Dinner',
     snack: 'Snack',
     supplements: 'Supplements',
+    takeWhey: 'Taking whey protein today',
+    wheyOn: (g, name) => `${g} g removed from ${name} and its alternatives for the whey scoop.`,
+    wheyOnNoTarget: 'No chicken breast item found to reduce.',
+    wheyOff: 'Supplements are optional — their card is hidden for this day.',
+    wheySwap: (g) => `−${g} g for whey`,
     mealNote: 'Meal note',
     planName: 'Plan name',
     addMeal: 'Add meal',
@@ -732,9 +746,19 @@ export default function App() {
       localStorage.setItem(DAY_PREFIX + day, JSON.stringify(next));
       return next;
     });
+  const takeSupplements = log[SUPPLEMENTS_LOG_KEY] ?? !!prefs.supplements;
+  const {
+    plan: dayPlan,
+    hasSupplements,
+    swap,
+  } = useMemo(() => applySupplementChoice(plan, takeSupplements), [plan, takeSupplements]);
+  const setSupplements = (take) => {
+    commitLog((old) => ({ ...old, [SUPPLEMENTS_LOG_KEY]: take }));
+    setPrefs((p) => ({ ...p, supplements: take }));
+  };
   const rows = useMemo(
     () =>
-      (plan?.meals || []).flatMap((meal, mi) =>
+      (dayPlan?.meals || []).flatMap((meal, mi) =>
         (meal.slots || []).map((slot) => {
           const entry = entryFor(log, slot),
             option = itemFor(slot, entry);
@@ -749,7 +773,7 @@ export default function App() {
           };
         }),
       ),
-    [plan, log],
+    [dayPlan, log],
   );
   const totals = useMemo(
     () =>
@@ -951,6 +975,38 @@ export default function App() {
           </section>
         ) : (
           <>
+            {hasSupplements && (
+              <section className="mb-4 flex items-center justify-between gap-4 rounded-3xl border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl ${takeSupplements ? 'bg-emerald-500/15 text-emerald-500' : 'bg-slate-100 text-slate-400 dark:bg-slate-800'}`}
+                  >
+                    <Pill size={20} />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-bold">{t.takeWhey}</p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {!takeSupplements
+                        ? t.wheyOff
+                        : swap
+                          ? t.wheyOn(number(swap.grams), swap.name)
+                          : t.wheyOnNoTarget}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  role="switch"
+                  aria-checked={takeSupplements}
+                  aria-label={t.takeWhey}
+                  onClick={() => setSupplements(!takeSupplements)}
+                  className={`relative h-7 w-12 shrink-0 rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-emerald-400 ${takeSupplements ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+                >
+                  <span
+                    className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-all ${takeSupplements ? 'start-6' : 'start-1'}`}
+                  />
+                </button>
+              </section>
+            )}
             <section className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
               <div className="rounded-3xl bg-gradient-to-br from-slate-900 to-slate-800 p-5 text-white shadow-xl sm:p-7">
                 <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
@@ -1036,7 +1092,12 @@ export default function App() {
                   variant="danger"
                   className="mt-3"
                   onClick={() => {
-                    if (ask(t.confirmReset)) commitLog({});
+                    if (ask(t.confirmReset))
+                      commitLog((old) =>
+                        SUPPLEMENTS_LOG_KEY in old
+                          ? { [SUPPLEMENTS_LOG_KEY]: old[SUPPLEMENTS_LOG_KEY] }
+                          : {},
+                      );
                   }}
                 >
                   <RotateCcw size={15} />
@@ -1049,7 +1110,7 @@ export default function App() {
               <h2 className="text-xl font-bold">{t.meals}</h2>
             </div>
             <div className="grid gap-5">
-              {plan.meals.map((meal, mi) => {
+              {dayPlan.meals.map((meal, mi) => {
                 const mealRows = rows.filter((r) => r.meal.id === meal.id);
                 const mealGoal = mealRows.reduce((sum, r) => sum + r.goal, 0),
                   mealEaten = mealRows.reduce((sum, r) => sum + r.eaten, 0);
@@ -1062,8 +1123,8 @@ export default function App() {
                       <div className="flex items-center justify-between">
                         <h3 className="font-extrabold">
                           {t[meal.kind] || meal.kind}
-                          {plan.meals.filter((m) => m.kind === meal.kind).length > 1
-                            ? ` · ${plan.meals.slice(0, mi + 1).filter((m) => m.kind === meal.kind).length}`
+                          {dayPlan.meals.filter((m) => m.kind === meal.kind).length > 1
+                            ? ` · ${dayPlan.meals.slice(0, mi + 1).filter((m) => m.kind === meal.kind).length}`
                             : ''}
                         </h3>
                         <span className="text-xs font-semibold text-slate-500 dark:text-slate-300">
@@ -1109,6 +1170,11 @@ export default function App() {
                                   >
                                     {done ? t.complete : partial ? t.partial : t.notStarted}
                                   </span>
+                                  {swap?.slotId === row.slot.id && (
+                                    <span className="ms-2 rounded-full bg-emerald-500/10 px-2 py-0.5 font-semibold text-emerald-600 dark:text-emerald-400">
+                                      {t.wheySwap(number(swap.grams))}
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="mt-2">
                                   <Progress eaten={row.eaten} total={row.goal} />

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
+  applySupplementChoice,
   canonicalArabic,
   detectAlternativesHeading,
   extractFoodWeight,
@@ -400,3 +401,27 @@ test(
     assert.deepEqual(actual, want);
   },
 );
+
+// Optional whey: off hides the supplements meal, on swaps grams off the lunch chicken.
+test('applySupplementChoice toggles the whey swap', () => {
+  const plan = parseMealText(fixture('shady-walid-extracted.txt'));
+  const off = applySupplementChoice(plan, false);
+  assert.equal(off.hasSupplements, true);
+  assert.ok(off.plan.meals.every((m) => m.kind !== 'supplements'));
+  assert.equal(off.swap, null);
+
+  const on = applySupplementChoice(plan, true);
+  assert.equal(on.swap.grams, 80);
+  assert.ok(on.plan.meals.some((m) => m.kind === 'supplements'));
+  const lunch = on.plan.meals.find((m) => m.kind === 'lunch');
+  const chicken = lunch.slots.find((s) => s.id === on.swap.slotId);
+  assert.match(chicken.primary.name, /لحم فقط/);
+  assert.equal(chicken.primary.grams, 100);
+  assert.ok(chicken.alternatives.every((a) => a.grams === 100));
+  // The stored plan is never mutated.
+  const original = plan.meals.find((m) => m.kind === 'lunch').slots.find((s) => s.id === chicken.id);
+  assert.equal(original.primary.grams, 180);
+
+  const plain = parseMealText('Lunch\nصدر دجاج (180 جرام)');
+  assert.equal(applySupplementChoice(plain, true).hasSupplements, false);
+});

@@ -898,6 +898,58 @@ export function parseMealText(input, options) {
   return parseMealSections(lines, options);
 }
 
+// ---------------------------------------------------------------------------
+// Optional supplements (whey) swap
+// ---------------------------------------------------------------------------
+// "درجاج" covers the scrambled "صددرجاج" that some PDFs extract for "صدر دجاج".
+const CHICKEN_RE = /صدر|صدور|دجاج|درجاج|chicken|breast/i;
+const DEFAULT_WHEY_SWAP = 80;
+
+/**
+ * Supplements are optional: the coach's note ("ممكن نبدل 80 جم من الصدور الموجودة في
+ * الغداء بسكوب واي") swaps grams of chicken breast for a whey scoop. Returns the plan as
+ * it applies for the day plus the slot that was reduced and by how much.
+ * - take = false: supplement meals are dropped, everything else unchanged.
+ * - take = true: supplement meals stay and the chicken slot (preferring lunch) loses the
+ *   swap grams from its primary and every alternative.
+ */
+export function applySupplementChoice(plan, take) {
+  const meals = plan?.meals || [];
+  const supplements = meals.filter((m) => m.kind === 'supplements');
+  if (!supplements.length) return { plan, hasSupplements: false, swap: null };
+  if (!take)
+    return {
+      plan: { ...plan, meals: meals.filter((m) => m.kind !== 'supplements') },
+      hasSupplements: true,
+      swap: null,
+    };
+  const noteGrams = supplements
+    .map((m) => normalizeDigits(m.note || '').match(/(\d{1,4})\s*(?:جم|جرام|غرام|grams?|g)(?![a-z])/i))
+    .find(Boolean);
+  const grams = noteGrams ? Number(noteGrams[1]) : DEFAULT_WHEY_SWAP;
+  const isChicken = (slot) => CHICKEN_RE.test(canonicalArabic(slot.primary?.name || ''));
+  const target =
+    meals.filter((m) => m.kind === 'lunch').flatMap((m) => m.slots || []).find(isChicken) ||
+    meals.flatMap((m) => m.slots || []).find(isChicken);
+  if (!target) return { plan, hasSupplements: true, swap: null };
+  const reduce = (o) => ({ ...o, grams: Math.max(0, (+o.grams || 0) - grams) });
+  return {
+    plan: {
+      ...plan,
+      meals: meals.map((m) => ({
+        ...m,
+        slots: (m.slots || []).map((s) =>
+          s === target
+            ? { ...s, primary: reduce(s.primary), alternatives: (s.alternatives || []).map(reduce) }
+            : s,
+        ),
+      })),
+    },
+    hasSupplements: true,
+    swap: { slotId: target.id, name: target.primary.name, grams },
+  };
+}
+
 /** Drops parse-time review markers before a plan is persisted. */
 export function stripReviewFlags({ days, day, ...plan }) {
   return {
