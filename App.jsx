@@ -39,6 +39,7 @@ import {
   makeMeal,
   makeOption,
   makeSlot,
+  parseMealSections,
   parseMealText,
   parseNutritionPdf,
   stripReviewFlags,
@@ -143,7 +144,6 @@ const translations = {
     warning:
       'تعذر اكتشاف وجبات واضحة. جرب فصل أسماء الوجبات ووضع الوزن بجانب الصنف، ثم راجع النتائج.',
     loading: 'جاري قراءة PDF...',
-    confirmReplace: 'استبدال الخطة سيحذف سجلات الأيام السابقة نهائيًا. هل تريد المتابعة؟',
     confirmAll: 'تسجيل جميع الكميات المتبقية لهذا اليوم كمتناولة؟',
     confirmReset: 'مسح تسجيلات هذا اليوم فقط؟',
     resetDay: 'تصفير اليوم',
@@ -164,6 +164,8 @@ const translations = {
     optionName: 'اسم الطعام',
     checkGrouping: 'تحقق: لم يتأكد المستخرج هل هذا صنف أساسي أم بديل.',
     makePrimary: 'اجعله الاختيار الأساسي',
+    planDay: 'يوم الخطة',
+    dayLabel: 'اليوم',
     splitAlternative: 'افصله كصنف مستقل',
     mergeIntoPrevious: 'اجعله بديلًا للصنف السابق',
     optionWeight: 'الوزن بالجرام',
@@ -242,7 +244,6 @@ const translations = {
     warning:
       'No recognizable meal items found. Try adding explicit meal headings and weights, then review.',
     loading: 'Reading PDF...',
-    confirmReplace: 'Replacing the plan permanently deletes all previous daily logs. Continue?',
     confirmAll: 'Mark every remaining gram for today as eaten?',
     confirmReset: 'Clear only today’s consumption logs?',
     resetDay: 'Reset today',
@@ -265,6 +266,8 @@ const translations = {
     checkGrouping:
       'Check: the extractor was not sure whether this is a main item or an alternative.',
     makePrimary: 'Make primary choice',
+    planDay: 'Plan day',
+    dayLabel: 'Day',
     splitAlternative: 'Split into its own item',
     mergeIntoPrevious: 'Make it an alternative of the previous item',
     optionWeight: 'Weight in grams',
@@ -571,6 +574,7 @@ export default function App() {
   const [draft, setDraft] = useState(null);
   const [textInput, setTextInput] = useState('');
   const [rawExtracted, setRawExtracted] = useState('');
+  const [reparse, setReparse] = useState(null); // re-parses the source for another day plan
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
@@ -651,7 +655,6 @@ export default function App() {
       setError(t.warning);
       return;
     }
-    if (plan && !ask(t.confirmReplace)) return;
     if (plan) clearDailyLogs();
     const clean = stripReviewFlags(value);
     localStorage.setItem(PLAN_KEY, JSON.stringify(clean));
@@ -670,8 +673,10 @@ export default function App() {
     setModal('review');
   };
   const fromText = () => {
-    const value = parseMealText(textInput);
-    setRawExtracted(textInput);
+    const source = textInput;
+    const value = parseMealText(source);
+    setRawExtracted(source);
+    setReparse(() => (day) => parseMealText(source, { day }));
     preview(value);
   };
   const fromFile = async (e) => {
@@ -680,11 +685,13 @@ export default function App() {
     setBusy(true);
     setError('');
     try {
-      const { text: raw, plan: value } = await parseNutritionPdf(file);
+      const { text: raw, lines, plan: value } = await parseNutritionPdf(file);
       setTextInput(raw);
       setRawExtracted(raw);
       if (!raw.trim()) throw new Error(t.cannotExtract);
-      value.name = file.name.replace(/\.pdf$/i, '');
+      const name = file.name.replace(/\.pdf$/i, '');
+      value.name = name;
+      setReparse(() => (day) => ({ ...parseMealSections(lines, { day }), name }));
       preview(value);
     } catch (err) {
       setError(`${err.message}. ${t.pdfWarning}`);
@@ -1102,6 +1109,24 @@ export default function App() {
         <Modal title={t.review} onClose={() => setModal(null)} wide>
           <div className="space-y-5">
             <p className="text-sm text-slate-500 dark:text-slate-400">{t.reviewDescription}</p>
+            {draft.days?.length > 1 && reparse && (
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                {t.planDay}
+                <select
+                  value={draft.day}
+                  onChange={(e) =>
+                    setDraft({ ...reparse(Number(e.target.value)), name: draft.name })
+                  }
+                  className="rounded-xl bg-slate-100 px-2 py-2 font-bold dark:bg-slate-800"
+                >
+                  {draft.days.map((d) => (
+                    <option key={d} value={d}>
+                      {t.dayLabel} {d}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <MealEditor draft={draft} setDraft={setDraft} t={t} />
             {rawExtracted && (
               <details className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">

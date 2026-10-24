@@ -17,9 +17,9 @@ export const MEAL_TYPES = ['breakfast', 'snack', 'lunch', 'dinner', 'supplements
 // ---------------------------------------------------------------------------
 // Character classes
 // ---------------------------------------------------------------------------
-const ARABIC_RE = /[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]/;
-const PRESENTATION_RE = /[ﭐ-﷿ﹰ-﻿]/;
-const ARABIC_LETTER_RE = /[ء-يٱ-ۓ]/;
+const ARABIC_RE = /[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]/;
+const PRESENTATION_RE = /[\ufb50-\ufdff\ufe70-\ufeff]/;
+const ARABIC_LETTER_RE = /[\u0621-\u064a\u0671-\u06d3]/;
 // Letters that only connect to the letter before them (never to the next one).
 const RIGHT_JOINING = new Set([...'اأإآٱدذرزوؤةى', 'ء']);
 const ALEFS = new Set([...'اأإآٱ']);
@@ -118,10 +118,10 @@ export function normalizeArabicText(s) {
       .replace(/﴿/g, '(')
       .normalize('NFKC'),
   )
-    .replace(/[​-‏؜‪-‮⁦-⁩﻿]/g, '') // direction marks
-    .replace(/[ً-ٰٟ]/g, '') // tashkeel
+    .replace(/[\u200b-\u200f\u061c\u202a-\u202e\u2066-\u2069\ufeff]/g, '') // direction marks
+    .replace(/[\u064b-\u065f\u0670]/g, '') // tashkeel
     .replace(/ـ/g, '') // tatweel
-    .replace(/[  -   　]/g, ' ')
+    .replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(/\(\s+/g, '(')
     .replace(/\s+\)/g, ')')
@@ -155,7 +155,8 @@ const MIRROR = {
   '»': '«',
 };
 const BRIDGE_RE = /^[.,:/]+$/; // neutrals kept inside a left-to-right run (9.07, 1/2)
-const tokenKind = (t) => (hasArabic(t) ? 'rtl' : /[A-Za-z0-9٠-٩۰-۹]/.test(t) ? 'ltr' : 'neutral');
+const tokenKind = (t) =>
+  hasArabic(t) ? 'rtl' : /[A-Za-z0-9\u0660-\u0669\u06f0-\u06f9]/.test(t) ? 'ltr' : 'neutral';
 
 // Short words used only to choose between the two possible orders of an ambiguous
 // two-letter fragment (see orientToken). The general rules handle everything else.
@@ -347,7 +348,10 @@ export function repairArabicVisualOrder(input, { force = false } = {}) {
     }
     // Arabic fragment, possibly with trailing/leading punctuation glued to it.
     const m = tok.text.match(/^([^\p{L}]*)([\s\S]*?)([^\p{L}]*)$/u);
-    const oriented = orientToken(m[2]);
+    const oriented =
+      tok.visual === true
+        ? { text: [...m[2]].reverse().join(''), reversed: true, ambiguous: false }
+        : orientToken(m[2]);
     // Punctuation glued to a visual-order fragment sits on the opposite side logically.
     const [pre, post] = oriented.reversed ? [m[3], m[1]] : [m[1], m[3]];
     logical.push({
@@ -427,84 +431,175 @@ export function repairArabicVisualOrder(input, { force = false } = {}) {
 // ---------------------------------------------------------------------------
 // C. PDF.js line reconstruction
 // ---------------------------------------------------------------------------
+const UNKNOWN_GLYPH = '\ufffd';
+// (base letter, shape) → Presentation Forms-B glyph, the inverse of FORMS_B.
+const PRES_OF = new Map();
+for (const [code, { base, form }] of FORMS_B)
+  if (base.length === 1) PRES_OF.set(`${base}|${form}`, String.fromCodePoint(code));
+const isDualJoining = (c) => ARABIC_LETTER_RE.test(c) && !RIGHT_JOINING.has(c);
+const itemSize = (item) => {
+  const t = item.transform || [1, 0, 0, 1, 0, 0];
+  return Math.hypot(t[2], t[3]) || item.height || 10;
+};
+
+/** Unmapped glyphs (no ToUnicode entry) become U+FFFD; "۔" between digits is a decimal point. */
+function cleanItemString(str) {
+  return str.replace(/\u0000/g, UNKNOWN_GLYPH).replace(/\u06d4/g, '.');
+}
+
+/** Median advance width (as a fraction of font size) of every single glyph in the document, per font. */
+export function buildGlyphWidths(items) {
+  const samples = new Map();
+  for (const item of items || []) {
+    const str = cleanItemString(item.str ?? '');
+    const size = itemSize(item);
+    if ([...str].length !== 1 || !(item.width > 0)) continue;
+    for (const key of [`${item.fontName}|${str}`, `*|${str}`]) {
+      if (!samples.has(key)) samples.set(key, []);
+      samples.get(key).push(item.width / size);
+    }
+  }
+  const table = new Map();
+  for (const [key, list] of samples) table.set(key, list.sort((a, b) => a - b)[list.length >> 1]);
+  return table;
+}
+
+/** Width the text would occupy if `logical` were shaped (joined letters take contextual glyphs). */
+function shapedWidth(logical, font, size, widths) {
+  const chars = [...logical];
+  let total = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    let candidates = [c];
+    if (ARABIC_LETTER_RE.test(c)) {
+      const joinPrev = i > 0 && isDualJoining(chars[i - 1]);
+      const joinNext =
+        i < chars.length - 1 && ARABIC_LETTER_RE.test(chars[i + 1]) && isDualJoining(c);
+      const form = joinPrev && joinNext ? 'med' : joinPrev ? 'fin' : joinNext ? 'init' : 'isol';
+      const pres = PRES_OF.get(`${c}|${form}`);
+      candidates = form === 'isol' ? [c, pres] : [pres];
+    }
+    const w = candidates
+      .filter(Boolean)
+      .map((g) => widths.get(`${font}|${g}`) ?? widths.get(`*|${g}`))
+      .find((v) => v != null);
+    if (w == null) return null;
+    total += w * size;
+  }
+  return total;
+}
+const hasJoins = (logical) => {
+  const chars = [...logical];
+  return chars.some(
+    (c, i) => i < chars.length - 1 && ARABIC_LETTER_RE.test(chars[i + 1]) && isDualJoining(c),
+  );
+};
+
+/**
+ * PDF.js returns multi-letter Arabic items in one of two orders:
+ * - connected letters drawn as one ligature glyph ("رب" for "بر", "ين" for "ني") come
+ *   out in visual order;
+ * - separate, unconnected glyphs merged into one item ("ام", "زار") come out in logical
+ *   order — and their width is exactly the sum of the isolated letters.
+ * Returns the item text in visual order.
+ */
+function visualItemText(str, item, widths) {
+  const letters = [...str];
+  if (letters.length < 2 || !hasArabic(str) || hasPresentationForms(str)) return str;
+  const reversed = [...letters].reverse().join('');
+  if (hasJoins(str)) return str; // read as logical it would be connected → it is a ligature
+  if (!hasJoins(reversed)) return reversed; // unconnected either way (e.g. "ر او و", "ع\ا")
+  const size = itemSize(item);
+  const isolated = shapedWidth(str, item.fontName, size, widths);
+  if (isolated == null) return orientToken(str.replace(/\s+/g, '')).reversed ? str : reversed;
+  return Math.abs(isolated - item.width) <= 0.15 * size ? reversed : str;
+}
+
 /**
  * Group PDF.js text items into reading lines with layout metadata.
- * Rows come from y position; within a row, item order follows x, and the gap between
- * consecutive items (relative to font size) marks real word breaks — the PDF.js
- * strings themselves can't be trusted to carry spaces for shaped Arabic glyphs.
+ * Rows come from the position across the baseline (rotated text, e.g. vertical day
+ * labels, is read along its own baseline). Within a row items are ordered along the
+ * baseline; the gap between items and explicit space items mark word breaks, and
+ * `widths` (from buildGlyphWidths over the whole document) fixes each item's order.
  */
-export function reconstructPdfLines(items, { page = 1 } = {}) {
+export function reconstructPdfLines(items, { page = 1, widths = buildGlyphWidths(items) } = {}) {
   const rows = [];
   for (const item of items || []) {
-    const str = item.str ?? '';
+    const str = cleanItemString(item.str ?? '');
     if (!str) continue;
     const t = item.transform || [1, 0, 0, 1, 0, 0];
-    const size = Math.hypot(t[2], t[3]) || item.height || 10;
-    const x = t[4],
-      y = t[5];
-    const width = item.width ?? 0;
-    let row = rows.find((r) => Math.abs(r.y - y) < Math.max(2, size * 0.45));
+    const size = itemSize(item);
+    const len = Math.hypot(t[0], t[1]) || 1;
+    const dx = t[0] / len,
+      dy = t[1] / len;
+    const orient = `${Math.round(dx)},${Math.round(dy)}`;
+    const pos = t[4] * dx + t[5] * dy;
+    const perp = t[5] * dx - t[4] * dy;
+    let row = rows.find(
+      (r) => r.orient === orient && Math.abs(r.perp - perp) < Math.max(2, size * 0.45),
+    );
     if (!row) {
-      row = { y, size, items: [] };
+      row = { orient, perp, size, items: [] };
       rows.push(row);
     }
     row.size = Math.max(row.size, size);
-    row.items.push({ str, x, width, size, dir: item.dir });
+    row.items.push({ str, pos, width: item.width ?? 0, size, font: item.fontName, item });
   }
-  rows.sort((a, b) => b.y - a.y);
+  rows.sort((a, b) => b.perp - a.perp);
   return rows
     .map((row, index) => {
-      const parts = row.items.sort((a, b) => a.x - b.x);
-      const visualMode = parts.some((p) => hasPresentationForms(p.str));
+      const parts = row.items.sort((a, b) => a.pos - b.pos);
+      const arabic = parts.filter((p) => hasArabic(p.str));
+      const glyphLevel =
+        arabic.length > 0 &&
+        arabic.filter((p) => [...p.str.trim()].length <= 3).length / arabic.length > 0.6;
+      const visualMode = parts.some((p) => hasPresentationForms(p.str)) || glyphLevel;
       const tokens = [];
-      let prev = null;
+      let prev = null,
+        space = false;
       for (const p of parts) {
         if (!p.str.trim()) {
-          if (prev) prev.spaceAfter = true;
+          space = true;
           continue;
         }
-        const gap = prev ? p.x - (prev.x + prev.width) : 0;
-        const pieces = p.str.trim().split(/\s+/);
-        pieces.forEach((text, i) => {
-          tokens.push({
-            text,
-            gapBefore: !tokens.length
-              ? null
-              : i > 0
-                ? true
-                : prev?.spaceAfter || gap > p.size * 0.18
-                  ? true
-                  : gap < p.size * 0.06
-                    ? false
-                    : null,
+        const gap = prev ? p.pos - (prev.pos + prev.width) : 0;
+        const text = visualMode && hasArabic(p.str) ? visualItemText(p.str, p.item, widths) : p.str;
+        text
+          .trim()
+          .split(/\s+/)
+          .forEach((piece, i) => {
+            tokens.push({
+              text: piece,
+              gapBefore: !tokens.length ? null : i > 0 || space || gap > p.size * 0.15,
+              visual: visualMode,
+            });
           });
-        });
         prev = p;
+        space = false;
       }
-      let text, repaired, confident;
-      if (visualMode)
-        ({ text, repaired, confident } = repairArabicVisualOrder(tokens, { force: true }));
+      let text, repaired;
+      if (visualMode) ({ text, repaired } = repairArabicVisualOrder(tokens, { force: true }));
       else {
         // Already-logical items: right-to-left rows read from the rightmost item.
-        const rtl = parts.filter((p) => hasArabic(p.str)).length > parts.length / 2;
-        const ordered = rtl ? [...parts].reverse() : parts;
+        const ordered = arabic.length > parts.length / 2 ? [...parts].reverse() : parts;
         text = normalizeArabicText(ordered.map((p) => p.str).join(' '));
         repaired = false;
-        confident = true;
       }
-      const xs = parts.map((p) => p.x),
-        xe = parts.map((p) => p.x + p.width);
+      const fonts = new Map();
+      for (const p of arabic.length ? arabic : parts)
+        fonts.set(p.font, (fonts.get(p.font) || 0) + 1);
       return {
         text,
-        original: parts.map((p) => p.str).join(' '),
+        original: parts.map((p) => p.str).join(''),
         repaired,
-        confident,
         page,
         index,
-        y: row.y,
+        rotated: row.orient !== '1,0',
+        y: row.perp,
         size: row.size,
-        xMin: Math.min(...xs),
-        xMax: Math.max(...xe),
+        font: [...fonts].sort((a, b) => b[1] - a[1])[0]?.[0],
+        xMin: Math.min(...parts.map((p) => p.pos)),
+        xMax: Math.max(...parts.map((p) => p.pos + p.width)),
       };
     })
     .filter((l) => l.text)
@@ -541,6 +636,11 @@ export function extractFoodWeight(text) {
     new RegExp(`^${NUM}\\s*${UNIT}(?=\\s|$)`, 'iu'),
     new RegExp(`(?:^|\\s)${NUM}\\s*${UNIT}$`, 'iu'),
     new RegExp(`^${UNIT}\\s*${NUM}(?=\\s|$)`, 'iu'),
+    // Some PDF fonts have no text mapping for the unit glyphs, which arrive as U+FFFD
+    // (sometimes with the readable tail "ام" of "جرام"); next to a number in parentheses
+    // they can only be the unit.
+    new RegExp(`\\(\\s*${NUM}\\s*(?:${UNKNOWN_GLYPH}\\s*)+(?:ام|م)?\\s*\\)`, 'u'),
+    new RegExp(`\\(\\s*(?:${UNKNOWN_GLYPH}\\s*)+(?:ام|م)?\\s*${NUM}\\s*\\)`, 'u'),
   ];
   for (const re of patterns) {
     const m = s.match(re);
@@ -559,17 +659,45 @@ export function extractFoodWeight(text) {
   return null;
 }
 
-/** Returns the meal kind when the line is a section heading, otherwise null. */
-export function identifyMealSection(text) {
+const HEADINGS = [
+  ['breakfast', /^(?:breakfast|iftar|فطار|افطار|الافطار|الفطور|وجبه الافطار)$/],
+  ['lunch', /^(?:lunch|غداء|الغداء|وجبه الغداء)$/],
+  ['dinner', /^(?:dinner|sohour|suhoor|suhour|sahur|عشاء|العشاء|وجبه العشاء|سحور|السحور)$/],
+  [
+    'snack',
+    /^(?:snacks?|سناك|وجبه خفيفه|سناك \d|pre[- ]?breakfast|(?:before|pre)[- ]?workout|(?:after|post)[- ]?workout|قبل التمرين|بعد التمرين)$/,
+  ],
+  ['supplements', /^(?:supplements?|مكملات|المكملات|المكملات الغذائيه)$/],
+];
+const PLAIN_HEADINGS =
+  /^(?:breakfast|lunch|dinner|snacks?|supplements?|فطار|افطار|الافطار|الفطور|غداء|الغداء|عشاء|العشاء|سناك|مكملات|المكملات)$/;
+
+/**
+ * Meal heading → { kind, label }. `label` keeps the coach's own title (e.g.
+ * "Before Workout", "Ramadan:Sohour") when it says more than the kind, else ''.
+ */
+export function mealHeading(text) {
   const t = canonicalArabic(text);
   if (t.length > 40 || extractFoodWeight(text)) return null;
-  const head = t.replace(/^\d+[.)\s-]*/, '').replace(/[:\s\d]+$/, '');
-  if (/^(?:breakfast|فطار|افطار|الافطار|الفطور|وجبه الافطار)$/.test(head)) return 'breakfast';
-  if (/^(?:lunch|غداء|الغداء|وجبه الغداء)$/.test(head)) return 'lunch';
-  if (/^(?:dinner|عشاء|العشاء|وجبه العشاء)$/.test(head)) return 'dinner';
-  if (/^(?:snacks?|سناك|وجبه خفيفه|سناك \d)$/.test(head)) return 'snack';
-  if (/^(?:supplements?|مكملات|المكملات|المكملات الغذائيه)$/.test(head)) return 'supplements';
-  return null;
+  const head = t
+    .replace(/^\d+[.)\s-]*/, '')
+    .replace(/^(?:ramadan|رمضان)\s*[:\-–]\s*/, '')
+    .replace(/[:\s\d]+$/, '');
+  const match = HEADINGS.find(([, re]) => re.test(head));
+  if (!match) return null;
+  const label = PLAIN_HEADINGS.test(t.replace(/[:\s\d]+$/, '')) ? '' : normalizeArabicText(text);
+  return { kind: match[0], label };
+}
+
+/** Returns the meal kind when the line is a section heading, otherwise null. */
+export function identifyMealSection(text) {
+  return mealHeading(text)?.kind ?? null;
+}
+
+/** "اليوم 2" / "Day 2" separators between alternative day plans → 2. */
+export function detectDayMarker(text) {
+  const m = canonicalArabic(text).match(/^(?:اليوم|يوم|day)\s*(\d{1,2})$/);
+  return m ? Number(m[1]) : null;
 }
 
 export function detectAlternativesHeading(text) {
@@ -577,15 +705,18 @@ export function detectAlternativesHeading(text) {
   return /^(?:البدائل|بدائل|البديل|بديل|alternatives?|substitutes?|or)$/.test(t);
 }
 
-const SUMMARY_RE = /^(?:ملخص النظام الغذائي|الفيتامينات|nutrition summary|summary)/;
+const SUMMARY_START_RE = /^(?:ملخص النظام الغذائي|الفيتامينات|nutrition summary|summary)/;
+const MACRO_WORDS_RE =
+  /(?:السعرات|البروتين|الكربوهيدرات|الدهون|calories|kcal|protein|carbs?|fats?)/gi;
 const NUTRIENT_RE = /^(?:[A-Z][A-Z0-9 ]+\s*\d+(?:\.\d+)?\s*){2,}$/;
-function isSummaryLine(text) {
-  const t = canonicalArabic(text);
+/** The plan-wide nutrition summary: everything after it is not a meal. */
+const isSummaryStart = (text) => SUMMARY_START_RE.test(canonicalArabic(text));
+/** Macro / nutrient rows (per meal or in tables) that are never foods. */
+function isNutritionInfoLine(text) {
   return (
-    SUMMARY_RE.test(t) ||
+    (canonicalArabic(text).match(MACRO_WORDS_RE) || []).length >= 2 ||
     NUTRIENT_RE.test(text) ||
-    /^(?:\d+(?:\.\d+)?\s+){2,}\d+(?:\.\d+)?$/.test(text) ||
-    /^(?:السعرات|البروتين|الكربوهيدرات|الدهون)(?:\s|$)/.test(t)
+    /^(?:\d+(?:\.\d+)?\s+){2,}\d+(?:\.\d+)?$/.test(text)
   );
 }
 
@@ -620,6 +751,15 @@ const close = (a, b, tol) => a != null && b != null && Math.abs(a - b) <= tol;
 function classifyAfterAlternatives(line, ctx) {
   const { primaryLine, firstAltLine, nextIsAltHeading, slot, grams } = ctx;
   if (nextIsAltHeading) return { primary: true, certain: true };
+  if (
+    line.font &&
+    primaryLine?.font &&
+    firstAltLine?.font &&
+    primaryLine.font !== firstAltLine.font
+  ) {
+    if (line.font === primaryLine.font) return { primary: true, certain: true };
+    if (line.font === firstAltLine.font) return { primary: false, certain: true };
+  }
   if (line.size != null && primaryLine?.size != null && firstAltLine?.size != null) {
     const edge = (l) => (hasArabic(l.text) ? l.xMax : l.xMin);
     const tol = Math.max(2, line.size * 0.6);
@@ -641,15 +781,18 @@ function classifyAfterAlternatives(line, ctx) {
 }
 
 /**
- * Builds the plan from reconstructed lines ({ text, size?, xMin?, xMax?, gapAbove? }).
- * Slots whose primary/alternative grouping could not be proven carry `review: true`
- * (stripped before the plan is saved).
+ * Builds the plan from reconstructed lines ({ text, size?, font?, xMin?, xMax?, gapAbove? }).
+ * Slots whose primary/alternative grouping could not be proven carry `review: true`.
+ * PDFs with several day plans ("اليوم 1", "اليوم 2", …) yield `days`; only `day`
+ * (default: the first) is returned as meals. Both markers are stripped before saving.
  */
-export function parseMealSections(lines) {
+export function parseMealSections(lines, { day } = {}) {
   const list = lines
     .map((l) => (typeof l === 'string' ? { text: l } : l))
     .filter((l) => l.text?.trim());
   const meals = [];
+  const days = [];
+  let dayNo = null;
   let current = null,
     slot = null,
     mode = 'primary',
@@ -665,19 +808,28 @@ export function parseMealSections(lines) {
   };
   list.forEach((line, i) => {
     const text = line.text;
-    const kind = identifyMealSection(text);
-    if (kind) {
-      current = makeMeal(kind);
+    const marker = detectDayMarker(text);
+    if (marker != null) {
+      dayNo = marker;
+      if (!days.includes(marker)) days.push(marker);
+      current = null;
+      return;
+    }
+    const heading = mealHeading(text);
+    if (heading) {
+      current = makeMeal(heading.kind, heading.label);
+      current.day = dayNo;
       meals.push(current);
       slot = null;
       mode = 'primary';
       return;
     }
     if (!current) return;
-    if (isSummaryLine(text)) {
+    if (isSummaryStart(text)) {
       current = null;
       return;
     }
+    if (isNutritionInfoLine(text)) return;
     if (detectAlternativesHeading(text)) {
       if (slot) {
         mode = 'alts-start';
@@ -687,7 +839,7 @@ export function parseMealSections(lines) {
     }
     const food = extractFoodWeight(text);
     if (!food) {
-      if (!slot && text.length > 8 && !/\d{4,}/.test(text))
+      if (!slot && text.length > 8 && !/\d{4,}/.test(text) && !text.includes(UNKNOWN_GLYPH))
         current.note = current.note ? `${current.note} — ${text}` : text;
       return;
     }
@@ -722,28 +874,32 @@ export function parseMealSections(lines) {
     current.slots.push(slot);
     primaryLine = line;
   });
+  const selected = day ?? days[0] ?? null;
   return {
     id: uid(),
     name: 'Imported nutrition plan',
     createdAt: new Date().toISOString(),
     origin: 'import',
     notes: '',
-    meals: meals.filter((m) => m.slots.length),
+    ...(days.length > 1 ? { days, day: selected } : {}),
+    meals: meals
+      .filter((m) => m.slots.length && (days.length < 2 || m.day === selected))
+      .map(({ day: _day, ...meal }) => meal),
   };
 }
 
 /** Plain-text entry point (pasted text or text copied out of a PDF viewer). */
-export function parseMealText(input) {
+export function parseMealText(input, options) {
   const lines = String(input || '')
     .replace(/\r/g, '\n')
     .split('\n')
     .map((raw) => repairArabicVisualOrder(raw).text)
     .filter(Boolean);
-  return parseMealSections(lines);
+  return parseMealSections(lines, options);
 }
 
 /** Drops parse-time review markers before a plan is persisted. */
-export function stripReviewFlags(plan) {
+export function stripReviewFlags({ days, day, ...plan }) {
   return {
     ...plan,
     meals: plan.meals.map((m) => ({ ...m, slots: m.slots.map(({ review, ...slot }) => slot) })),
@@ -779,13 +935,14 @@ export function loadPdfJs() {
 /** Extracts reconstructed lines for every page. `lib` is injectable for Node tests. */
 export async function extractPdfLines(data, lib) {
   const doc = await lib.getDocument({ data }).promise;
-  const lines = [];
+  const pages = [];
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
-    const content = await page.getTextContent();
-    lines.push(...reconstructPdfLines(content.items, { page: p }));
+    pages.push((await page.getTextContent()).items);
   }
-  return lines;
+  // Glyph widths are learned from the whole document, then used to order each page's items.
+  const widths = buildGlyphWidths(pages.flat());
+  return pages.flatMap((items, i) => reconstructPdfLines(items, { page: i + 1, widths }));
 }
 
 /** Browser entry point: returns repaired text (for the review/debug view), lines and the draft plan. */
