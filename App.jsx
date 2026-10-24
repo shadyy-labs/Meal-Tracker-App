@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   ArrowLeftRight,
+  ArrowUpToLine,
   CalendarDays,
   Check,
   CheckCheck,
@@ -12,6 +13,7 @@ import {
   CloudUpload,
   Code2,
   Coffee,
+  CornerLeftUp,
   Download,
   FileText,
   Github,
@@ -24,27 +26,36 @@ import {
   Save,
   Search,
   Settings2,
+  Split,
   ShieldAlert,
   Sun,
+  TriangleAlert,
   Trash2,
   UtensilsCrossed,
   X,
 } from 'lucide-react';
+import {
+  MEAL_TYPES,
+  makeMeal,
+  makeOption,
+  makeSlot,
+  parseMealText,
+  parseNutritionPdf,
+  stripReviewFlags,
+  uid,
+} from './src/planParser.js';
 
 /**
  * PDF Meal Plan Extractor / Daily Tracker
  * Install: npm i lucide-react
  * Styling: Tailwind CSS must be configured in the host Vite project.
- * PDF.js is injected from the CDN only when a PDF is first uploaded.
+ * PDF.js is injected from the CDN only when a PDF is first uploaded; extraction and
+ * Arabic text repair live in src/planParser.js.
  * All plan and day data stays in this browser's localStorage.
  */
 const PLAN_KEY = 'persistent_nutrition_plan';
 const DAY_PREFIX = 'daily_logs_';
 const SETTINGS_KEY = 'meal_tracker_settings';
-const uid = () =>
-  typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const clamp = (v, low, high) => Math.min(high, Math.max(low, Number.isFinite(+v) ? +v : low));
 const dateKey = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -60,217 +71,6 @@ function readJSON(key, fallback) {
   } catch {
     return fallback;
   }
-}
-function cleanArabic(str) {
-  return String(str || '')
-    .replace(/[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g, '')
-    .replace(/[\u064b-\u065f\u0670]/g, '')
-    .replace(/ـ/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-const DIGITS = '٠١٢٣٤٥٦٧٨٩';
-function latinDigits(s) {
-  return String(s)
-    .replace(/[٠-٩]/g, (c) => DIGITS.indexOf(c))
-    .replace(/[۰-۹]/g, (c) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(c))
-    .replace(/٫/g, '.')
-    .replace(/٬/g, '');
-}
-function normalizeText(s) {
-  return latinDigits(cleanArabic(s))
-    .replace(/[＞﹥›]/g, '>')
-    .replace(/\b(?:p|ρ|р)\s*[>|:]\s*(\d+(?:\.\d+)?)/gi, '$1 جم')
-    .replace(/(?:جم|ج|جرام)\s*[>|:]\s*(\d+(?:\.\d+)?)/gi, '$1 جم')
-    .replace(/\(\s*(?:ρ|p|ج|جم)\s*\|?\s*>\s*(\d+(?:\.\d+)?)\s*\)/gi, '$1 جم')
-    .replace(/\(\s*(\d+(?:\.\d+)?)\s*\)\s*(جرام|جم|غرام|g)\b/gi, '$1 $2')
-    .replace(/\(\s*(\d+(?:\.\d+)?)\s*(?:جرام|جم|غرام|g)\s*\)/gi, '$1 جم')
-    .replace(/\b(?:غرام|جرام|grams|gram)\b/gi, 'جم')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-const weightRe =
-  /(?:^|\s|\()(?<before>\d{1,5}(?:\.\d+)?)\s*(?:جم|ج|g|gr)(?=\s|\)|$)|(?:جم|ج|g|gr)\s*(?<after>\d{1,5}(?:\.\d+)?)/iu;
-function getWeight(line) {
-  const s = normalizeText(line);
-  const m = s.match(weightRe);
-  if (m) return Number(m.groups?.before || m.groups?.after);
-  // Handles broken glyphs e.g. (p>30) after symbol cleanup.
-  const odd = s.match(/(?:\(|^)(?:[ρpج]\s*\|?\s*>\s*)?(\d{1,5}(?:\.\d+)?)\s*\)?$/iu);
-  return odd && /[>\(]/.test(s) ? Number(odd[1]) : null;
-}
-function withoutWeight(line) {
-  return normalizeText(line)
-    .replace(
-      /(?:\(?\s*\d{1,5}(?:\.\d+)?\s*(?:جم|ج|g|gr)\s*\)?|\(?\s*(?:جم|ج|g|gr)\s*\d{1,5}(?:\.\d+)?\s*\)?)/giu,
-      '',
-    )
-    .replace(/^[\s•·:\-–—|()]+|[\s•·:\-–—|()]+$/g, '')
-    .trim();
-}
-const MEAL_TYPES = ['breakfast', 'snack', 'lunch', 'dinner', 'supplements'];
-function kindOf(s) {
-  const t = cleanArabic(s).toLowerCase();
-  if (/(?:\bbreakfast\b|فطار|افطار|إفطار|الفطور)/i.test(t)) return 'breakfast';
-  if (/(?:\blunch\b|الغداء|غداء)/i.test(t)) return 'lunch';
-  if (/(?:\bdinner\b|العشاء|عشاء)/i.test(t)) return 'dinner';
-  if (/(?:\bsnacks?\b|سناك|وجبة خفيفة)/i.test(t)) return 'snack';
-  if (/(?:\bsupplements?\b|مكملات)/i.test(t)) return 'supplements';
-  return null;
-}
-const isAlternatives = (s) =>
-  /^(?:البدائل|بدائل|alternatives?|substitutes?)\s*:?$/i.test(cleanArabic(s));
-function makeOption(name, grams) {
-  return { id: uid(), name: cleanArabic(name), grams: Number(grams) || 0 };
-}
-function makeSlot(name, grams, alternatives = []) {
-  return {
-    id: uid(),
-    primary: makeOption(name, grams),
-    alternatives: alternatives.map((a) => makeOption(a[0], a[1])),
-  };
-}
-function makeMeal(kind, note = '') {
-  return { id: uid(), kind, note, slots: [] };
-}
-
-// Separately detect headers and keep repeated Snacks as distinct meal sections.
-function parseMealText(input) {
-  const lines = String(input || '')
-    .replace(/\r/g, '\n')
-    .split(/\n/)
-    .map((s) => normalizeText(s))
-    .filter(Boolean);
-  const meals = [];
-  let current = null;
-  let lastSlot = null;
-  let alternatives = false;
-  let weightOnly = null;
-  const skip =
-    /^(?:ملخص النظام الغذائي|السعرات|البروتين|الكربوهيدرات|الدهون|الفيتامينات|التعليمات|shady walid|diet plan|ash\b|iron\b|zinc\b)/i;
-  function addLine(line, forceAlt = alternatives) {
-    const grams = getWeight(line);
-    if (grams == null || !current) return false;
-    const name = withoutWeight(line)
-      .replace(/^\s*[•●]\s*/, '')
-      .trim();
-    if (!name || /^\d+(?:\.\d+)?$/.test(name)) {
-      weightOnly = { grams, forceAlt };
-      return true;
-    }
-    if (forceAlt && lastSlot) lastSlot.alternatives.push(makeOption(name, grams));
-    else {
-      lastSlot = makeSlot(name, grams);
-      current.slots.push(lastSlot);
-      alternatives = false;
-    }
-    return true;
-  }
-  for (const line of lines) {
-    const head = kindOf(line);
-    if (
-      head &&
-      (line.length < 40 ||
-        /^\s*(?:\d+[.)\s-]+)?(?:breakfast|lunch|dinner|snack|supplements|فطار|إفطار|غداء|عشاء|سناك|مكملات)/i.test(
-          line,
-        ))
-    ) {
-      current = makeMeal(head);
-      meals.push(current);
-      lastSlot = null;
-      alternatives = false;
-      weightOnly = null;
-      continue;
-    }
-    if (!current) continue;
-    if (isAlternatives(line)) {
-      alternatives = true;
-      weightOnly = null;
-      continue;
-    }
-    if (skip.test(line)) continue;
-    if (weightOnly && getWeight(line) == null && line.length > 1) {
-      if (weightOnly.forceAlt && lastSlot)
-        lastSlot.alternatives.push(makeOption(line, weightOnly.grams));
-      else {
-        lastSlot = makeSlot(line, weightOnly.grams);
-        current.slots.push(lastSlot);
-        alternatives = false;
-      }
-      weightOnly = null;
-      continue;
-    }
-    if (addLine(line)) continue;
-    if (!lastSlot && line.length > 8 && !/\d{4,}/.test(line))
-      current.note = current.note ? `${current.note} — ${line}` : line;
-  }
-  return {
-    id: uid(),
-    name: 'Imported nutrition plan',
-    createdAt: new Date().toISOString(),
-    origin: 'import',
-    notes: '',
-    meals: meals.filter((m) => m.slots.length),
-  };
-}
-
-// PDF text items can be laid out in two different directions, so reconstruct rows
-// by vertical position, then join the Arabic name and numeric quantity columns.
-function pageRows(items) {
-  const rows = [];
-  for (const item of items) {
-    const text = cleanArabic(item.str);
-    if (!text) continue;
-    const x = item.transform?.[4] ?? 0,
-      y = item.transform?.[5] ?? 0;
-    let row = rows.find((r) => Math.abs(r.y - y) < 3.4);
-    if (!row) {
-      row = { y, parts: [] };
-      rows.push(row);
-    }
-    row.parts.push({ text, x });
-  }
-  return rows
-    .sort((a, b) => b.y - a.y)
-    .map((row) => {
-      const chunks = row.parts.sort((a, b) => a.x - b.x);
-      // Keep column text separated: matching grams is direction-independent.
-      return normalizeText(chunks.map((c) => c.text).join(' '));
-    });
-}
-let pdfPromise;
-function loadPdfJs() {
-  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
-  if (!pdfPromise)
-    pdfPromise = new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-      s.onload = () => {
-        const lib = window.pdfjsLib;
-        if (!lib) return reject(new Error('PDF.js unavailable'));
-        lib.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        resolve(lib);
-      };
-      s.onerror = () => reject(new Error('Unable to load PDF.js CDN script'));
-      document.head.appendChild(s);
-    }).catch((e) => {
-      pdfPromise = undefined;
-      throw e;
-    });
-  return pdfPromise;
-}
-async function extractPdf(file) {
-  const lib = await loadPdfJs();
-  const data = new Uint8Array(await file.arrayBuffer());
-  const doc = await lib.getDocument({ data }).promise;
-  let parts = [];
-  for (let p = 1; p <= doc.numPages; p++) {
-    const page = await doc.getPage(p);
-    const content = await page.getTextContent();
-    parts.push(pageRows(content.items).join('\n'));
-  }
-  return parts.join('\n');
 }
 function validatePlan(plan) {
   return !!(
@@ -362,6 +162,10 @@ const translations = {
     addFood: 'إضافة صنف',
     addAlternative: 'إضافة بديل',
     optionName: 'اسم الطعام',
+    checkGrouping: 'تحقق: لم يتأكد المستخرج هل هذا صنف أساسي أم بديل.',
+    makePrimary: 'اجعله الاختيار الأساسي',
+    splitAlternative: 'افصله كصنف مستقل',
+    mergeIntoPrevious: 'اجعله بديلًا للصنف السابق',
     optionWeight: 'الوزن بالجرام',
     noMeals: 'لم يتم العثور على وجبات.',
     pdfWarning:
@@ -458,6 +262,11 @@ const translations = {
     addFood: 'Add food',
     addAlternative: 'Add alternative',
     optionName: 'Food name',
+    checkGrouping:
+      'Check: the extractor was not sure whether this is a main item or an alternative.',
+    makePrimary: 'Make primary choice',
+    splitAlternative: 'Split into its own item',
+    mergeIntoPrevious: 'Make it an alternative of the previous item',
     optionWeight: 'Weight in grams',
     noMeals: 'No meals detected.',
     pdfWarning:
@@ -595,7 +404,16 @@ function MealEditor({ draft, setDraft, t }) {
             }
           />
           {meal.slots.map((slot, si) => (
-            <div key={slot.id} className="rounded-xl bg-slate-50 p-3 dark:bg-slate-950/60">
+            <div
+              key={slot.id}
+              className={`rounded-xl bg-slate-50 p-3 dark:bg-slate-950/60 ${slot.review ? 'ring-1 ring-amber-500/60' : ''}`}
+            >
+              {slot.review && (
+                <p className="mb-2 flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                  <TriangleAlert size={14} />
+                  {t.checkGrouping}
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <div className="flex-[3]">
                   <Field
@@ -620,6 +438,23 @@ function MealEditor({ draft, setDraft, t }) {
                     }
                   />
                 </div>
+                {si > 0 && (
+                  <button
+                    aria-label={t.mergeIntoPrevious}
+                    title={t.mergeIntoPrevious}
+                    className="text-slate-400 hover:text-emerald-500"
+                    onClick={() =>
+                      update((p) => {
+                        const [moved] = p.meals[mi].slots.splice(si, 1);
+                        const target = p.meals[mi].slots[si - 1];
+                        target.alternatives.push(moved.primary, ...moved.alternatives);
+                        delete target.review;
+                      })
+                    }
+                  >
+                    <CornerLeftUp size={17} />
+                  </button>
+                )}
                 <button
                   aria-label={t.delete}
                   className="text-rose-500"
@@ -654,6 +489,38 @@ function MealEditor({ draft, setDraft, t }) {
                       }
                     />
                   </div>
+                  <button
+                    aria-label={t.makePrimary}
+                    title={t.makePrimary}
+                    className="text-slate-400 hover:text-emerald-500"
+                    onClick={() =>
+                      update((p) => {
+                        const s = p.meals[mi].slots[si];
+                        [s.primary, s.alternatives[ai]] = [s.alternatives[ai], s.primary];
+                      })
+                    }
+                  >
+                    <ArrowUpToLine size={17} />
+                  </button>
+                  <button
+                    aria-label={t.splitAlternative}
+                    title={t.splitAlternative}
+                    className="text-slate-400 hover:text-emerald-500"
+                    onClick={() =>
+                      update((p) => {
+                        const s = p.meals[mi].slots[si];
+                        const [alt] = s.alternatives.splice(ai, 1);
+                        delete s.review;
+                        p.meals[mi].slots.splice(si + 1, 0, {
+                          id: uid(),
+                          primary: alt,
+                          alternatives: [],
+                        });
+                      })
+                    }
+                  >
+                    <Split size={17} />
+                  </button>
                   <button
                     aria-label={t.delete}
                     className="text-rose-500"
@@ -786,8 +653,9 @@ export default function App() {
     }
     if (plan && !ask(t.confirmReplace)) return;
     if (plan) clearDailyLogs();
-    localStorage.setItem(PLAN_KEY, JSON.stringify(value));
-    setPlan(value);
+    const clean = stripReviewFlags(value);
+    localStorage.setItem(PLAN_KEY, JSON.stringify(clean));
+    setPlan(clean);
     setLog({});
     setModal(null);
     setError('');
@@ -812,11 +680,10 @@ export default function App() {
     setBusy(true);
     setError('');
     try {
-      const raw = await extractPdf(file);
+      const { text: raw, plan: value } = await parseNutritionPdf(file);
       setTextInput(raw);
       setRawExtracted(raw);
       if (!raw.trim()) throw new Error(t.cannotExtract);
-      const value = parseMealText(raw);
       value.name = file.name.replace(/\.pdf$/i, '');
       preview(value);
     } catch (err) {
@@ -908,7 +775,9 @@ export default function App() {
               <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-3xl bg-emerald-500 text-slate-950">
                 <UtensilsCrossed size={32} />
               </div>
-              <h2 className="mb-3 text-3xl font-extrabold tracking-tight sm:text-4xl">{t.welcome}</h2>
+              <h2 className="mb-3 text-3xl font-extrabold tracking-tight sm:text-4xl">
+                {t.welcome}
+              </h2>
               <p className="mx-auto mb-8 max-w-2xl text-slate-300">{t.welcomeText}</p>
               <Button variant="primary" onClick={() => setModal('import')}>
                 <CloudUpload size={18} />
